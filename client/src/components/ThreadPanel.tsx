@@ -1,9 +1,11 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { ArrowLeft, Pencil, Check, X, Paperclip, Trash2, Smile, Pin, ChevronDown, ChevronRight, Reply } from "lucide-react";
 import { useAppContext } from "@/lib/store";
 import { apiSendThreadMessage } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { MessageItem } from "./MessageItem";
+import { MentionMenu } from "./MentionMenu";
+import { findMentionMatches } from "@/lib/mentions";
 import { displayUserId } from "@/lib/utils";
 import { AuthAvatarImage } from "./AuthImage";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
@@ -30,6 +32,9 @@ export function ThreadPanel() {
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [pinsOpen, setPinsOpen] = useState(false);
+  /** The "@word" being typed at the caret, or null when there is none. */
+  const [mentionSearch, setMentionSearch] = useState<string | null>(null);
+  const [selectedMentionIdx, setSelectedMentionIdx] = useState(0);
   const {
     files: pendingFiles,
     add: addStagedFile,
@@ -81,6 +86,7 @@ export function ThreadPanel() {
     if (!roomId || !threadEventId) return;
     const replyTo = state.threadReplyingTo?.event_id;
     setBody("");
+    setMentionSearch(null);
     cancelReply();
 
     // A reply with files is handed to the outgoing queue whole, so closing the
@@ -105,7 +111,58 @@ export function ThreadPanel() {
     }
   }, [body, pendingFiles, clearPendingFiles, state.currentRoomId, state.activeThreadEventId, state.threadReplyingTo, threadLabel, cancelReply]);
 
+  const mentionMatches = useMemo(
+    () => (mentionSearch === null ? [] : findMentionMatches(state, mentionSearch)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mentionSearch, state.roomMembers, state.customRoles, state.currentRoomId, state.roomInfoMap],
+  );
+
+  /** Open the mention menu when the caret sits just after "@" or "@word". */
+  const detectMention = (value: string, caret: number) => {
+    const match = /(?:^|\s)@(\w*)$/.exec(value.slice(0, caret));
+    setMentionSearch(match ? match[1] : null);
+    setSelectedMentionIdx(0);
+  };
+
+  const completeMention = (name: string) => {
+    const el = inputRef.current;
+    if (!name || !el) return;
+    const caret = el.selectionStart ?? body.length;
+    const at = body.lastIndexOf("@", caret - 1);
+    if (at === -1) return;
+    const inserted = `@${name} `;
+    const next = body.slice(0, at) + inserted + body.slice(caret);
+    setBody(next);
+    setMentionSearch(null);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(at + inserted.length, at + inserted.length);
+    });
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionSearch !== null && mentionMatches.length > 0) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedMentionIdx((i) => Math.min(i + 1, mentionMatches.length - 1));
+        return;
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedMentionIdx((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        completeMention(mentionMatches[selectedMentionIdx]?.name);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setMentionSearch(null);
+        return;
+      }
+    }
     if (e.key === "Escape" && threadReplyingTo) {
       e.preventDefault();
       cancelReply();
@@ -521,7 +578,10 @@ export function ThreadPanel() {
           </div>
         )}
         <PendingAttachments files={pendingFiles} onRemove={removePendingFile} />
-        <div className="flex items-center gap-2 rounded-md border border-input bg-background px-3 py-2">
+        <div className="relative flex items-center gap-2 rounded-md border border-input bg-background px-3 py-2">
+          {mentionSearch !== null && (
+            <MentionMenu matches={mentionMatches} selectedIdx={selectedMentionIdx} onSelect={completeMention} />
+          )}
           <input
             ref={fileInputRef}
             type="file"
@@ -544,11 +604,13 @@ export function ThreadPanel() {
             rows={1}
             onChange={(e) => {
               setBody(e.target.value);
+              detectMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
               e.target.style.height = "auto";
               e.target.style.height = `${Math.min(e.target.scrollHeight, 96)}px`;
             }}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
+            onBlur={() => setMentionSearch(null)}
           />
           <Popover open={emojiOpen} onOpenChange={setEmojiOpen}>
             <PopoverTrigger asChild>

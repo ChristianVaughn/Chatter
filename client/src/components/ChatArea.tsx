@@ -7,6 +7,8 @@ import { STANDARD_SHORTCODES } from "@/lib/emojiShortcodes";
 import { composerLength, emojiImage, getComposerText, setComposerText } from "@/lib/composer";
 import { MessageItem } from "./MessageItem";
 import { MessagePanel } from "./MessagePanel";
+import { MentionMenu } from "./MentionMenu";
+import { findMentionMatches } from "@/lib/mentions";
 import type { AppState, MessageTarget } from "@/lib/store/types";
 
 /** Everything the companion slot can show. MessagePanel handles all but the
@@ -1462,31 +1464,11 @@ export function ChatArea({ onJoinVoice, dmCall }: ChatAreaProps) {
     return () => cancelAnimationFrame(raf);
   }, [scrollToEventId, state.messages]);
 
-  const mentionMatches = useMemo(() => {
-    if (!mentionOpen) return [];
-    const roomInfo = state.currentRoomId ? state.roomInfoMap[state.currentRoomId] : null;
-    const builtInRoles: { kind: "role"; id: string; name: string; color: string | undefined }[] = [];
-    for (const r of [{ name: "owner", color: roomInfo?.owner_name_color }, { name: "moderator", color: roomInfo?.mod_name_color }]) {
-      if (r.name.toLowerCase().startsWith(mentionSearch.toLowerCase())) {
-        builtInRoles.push({ kind: "role", id: `builtin-${r.name}`, name: r.name, color: r.color || undefined });
-      }
-    }
-    return [
-      ...state.roomMembers
-        .filter((m) =>
-          m.displayName.toLowerCase().startsWith(mentionSearch.toLowerCase())
-        )
-        .slice(0, 5)
-        .map((m) => ({ kind: "user" as const, id: m.userId, name: m.displayName, color: undefined as string | undefined })),
-      ...builtInRoles,
-      ...state.customRoles
-        .filter((r) =>
-          r.name.toLowerCase().startsWith(mentionSearch.toLowerCase())
-        )
-        .slice(0, 5)
-        .map((r) => ({ kind: "role" as const, id: r.role_id, name: r.name, color: r.color || undefined })),
-    ].slice(0, 8);
-  }, [mentionOpen, mentionSearch, state.roomMembers, state.customRoles, state.currentRoomId, state.roomInfoMap]);
+  const mentionMatches = useMemo(
+    () => (mentionOpen ? findMentionMatches(state, mentionSearch) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mentionOpen, mentionSearch, state.roomMembers, state.customRoles, state.currentRoomId, state.roomInfoMap],
+  );
 
   const emojiMatches = emojiAutocompleteOpen
     ? Object.entries(mergedShortcodes)
@@ -2052,38 +2034,8 @@ export function ChatArea({ onJoinVoice, dmCall }: ChatAreaProps) {
           )}
           <div className="relative flex items-end gap-2">
             {/* Mention autocomplete */}
-            {mentionOpen && mentionMatches.length > 0 && (
-              <div className="absolute bottom-full left-0 mb-1 w-56 rounded-md border bg-popover p-1 shadow-lg z-50">
-                {mentionMatches.map((m, i) => (
-                  <button
-                    key={`${m.kind}-${m.id}`}
-                    className={`flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer transition-colors ${
-                      i === selectedMentionIdx ? "bg-accent" : "hover:bg-accent/50"
-                    }`}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      completeMention(m.name);
-                    }}
-                  >
-                    {m.kind === "role" ? (
-                      <span
-                        className="flex h-6 w-6 items-center justify-center rounded-full text-xs font-semibold"
-                        style={{ backgroundColor: m.color ? `${m.color}33` : undefined, color: m.color || undefined }}
-                      >
-                        @
-                      </span>
-                    ) : (
-                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-secondary text-xs font-semibold">
-                        {m.name[0]?.toUpperCase()}
-                      </span>
-                    )}
-                    <span style={m.kind === "role" && m.color ? { color: m.color } : undefined}>{m.name}</span>
-                    {m.kind === "role" && (
-                      <span className="ml-auto text-xs text-muted-foreground">Role</span>
-                    )}
-                  </button>
-                ))}
-              </div>
+            {mentionOpen && (
+              <MentionMenu matches={mentionMatches} selectedIdx={selectedMentionIdx} onSelect={completeMention} />
             )}
 
             {/* Emoji shortcode autocomplete */}
