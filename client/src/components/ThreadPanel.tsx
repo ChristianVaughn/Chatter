@@ -175,10 +175,19 @@ export function ThreadPanel() {
   };
 
   const insertEmoji = useCallback((emoji: string) => {
-    setBody((prev) => prev + emoji);
+    // A custom emoji arrives as its image URL. Sent bare it is just a link and
+    // renders as a full-size image; the marker is what draws it inline.
+    const isImageUrl = emoji.startsWith("/") || emoji.startsWith("http");
+    const text = isImageUrl ? `:emoji{${emoji}}:` : emoji;
+    const el = inputRef.current;
+    const caret = el?.selectionStart ?? body.length;
+    setBody(body.slice(0, caret) + text + body.slice(caret));
     setEmojiOpen(false);
-    inputRef.current?.focus();
-  }, []);
+    requestAnimationFrame(() => {
+      el?.focus();
+      el?.setSelectionRange(caret + text.length, caret + text.length);
+    });
+  }, [body]);
 
 
   /** Stage files on the composer; nothing is uploaded or sent until Send. */
