@@ -106,3 +106,123 @@ export function composerLength(div: HTMLElement | null): number {
   walk(div);
   return len;
 }
+
+/*
+ * Editing at the caret. Shared by the channel and thread composers, which are
+ * both contenteditable divs and so have no `selectionStart` to lean on.
+ */
+
+/** Insert `node` at the caret, or at the end when the caret is elsewhere. */
+export function insertAtCaret(div: HTMLElement, node: Node): void {
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0 && div.contains(sel.getRangeAt(0).commonAncestorContainer)) {
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(node);
+    const after = document.createRange();
+    after.setStartAfter(node);
+    after.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(after);
+  } else {
+    div.appendChild(node);
+    const end = document.createRange();
+    end.selectNodeContents(div);
+    end.collapse(false);
+    sel?.removeAllRanges();
+    sel?.addRange(end);
+  }
+}
+
+/** Insert pasted or typed text, turning any emoji markers back into images. */
+export function insertTextAtCaret(div: HTMLElement, text: string): void {
+  EMOJI_MARKER.lastIndex = 0;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = EMOJI_MARKER.exec(text)) !== null) {
+    if (match.index > cursor) insertAtCaret(div, document.createTextNode(text.slice(cursor, match.index)));
+    insertAtCaret(div, emojiImage(match[1]));
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < text.length) insertAtCaret(div, document.createTextNode(text.slice(cursor)));
+}
+
+/** A collapsed range at a text-character offset within the div (ignores img/br). */
+export function rangeAtTextOffset(div: HTMLElement, targetOffset: number): Range | null {
+  let pos = 0;
+  const range = document.createRange();
+  const walk = (node: Node): boolean => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const len = (node.textContent ?? "").length;
+      if (pos + len >= targetOffset) {
+        range.setStart(node, targetOffset - pos);
+        range.collapse(true);
+        return true;
+      }
+      pos += len;
+    } else {
+      for (const child of Array.from(node.childNodes)) {
+        if (walk(child)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(div) ? range : null;
+}
+
+/** The plain text between the start of the div and the caret, or null. */
+export function textBeforeCaret(div: HTMLElement): string | null {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!div.contains(range.startContainer)) return null;
+  const pre = document.createRange();
+  pre.setStart(div, 0);
+  pre.setEnd(range.startContainer, range.startOffset);
+  return pre.toString();
+}
+
+/**
+ * Replace the text from `start` (a text offset) up to the caret with `text`,
+ * leaving the caret after it. How an "@na" or ":smi" becomes its completion.
+ */
+export function replaceBeforeCaret(div: HTMLElement, start: number, text: string): boolean {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return false;
+  const caret = sel.getRangeAt(0);
+  const range = rangeAtTextOffset(div, start);
+  if (!range) return false;
+  range.setEnd(caret.startContainer, caret.startOffset);
+  range.deleteContents();
+  const node = document.createTextNode(text);
+  range.insertNode(node);
+  const after = document.createRange();
+  after.setStartAfter(node);
+  after.collapse(true);
+  sel.removeAllRanges();
+  sel.addRange(after);
+  return true;
+}
+
+/**
+ * Remove an emoji image sitting directly before a collapsed caret. Some
+ * browsers will not backspace over an inline image in a contenteditable.
+ */
+export function deleteImageBeforeCaret(div: HTMLElement): boolean {
+  const sel = window.getSelection();
+  if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return false;
+  const range = sel.getRangeAt(0);
+  const container = range.startContainer;
+  const offset = range.startOffset;
+  let img: Node | null = null;
+  if (container === div && offset > 0) {
+    const child = container.childNodes[offset - 1];
+    if (child && (child as Element).tagName === "IMG") img = child;
+  } else if (container.nodeType === Node.TEXT_NODE && offset === 0) {
+    const prev = container.previousSibling;
+    if (prev && (prev as Element).tagName === "IMG") img = prev;
+  }
+  if (!img) return false;
+  img.parentNode?.removeChild(img);
+  return true;
+}

@@ -4,7 +4,16 @@ import { useAppContext } from "@/lib/store";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { apiSendMessage, apiCancelUpload, apiGetRoomThreads, apiUpdateChannel, type MatrixMessage } from "@/lib/api";
 import { STANDARD_SHORTCODES } from "@/lib/emojiShortcodes";
-import { composerLength, emojiImage, getComposerText, setComposerText } from "@/lib/composer";
+import {
+  composerLength,
+  deleteImageBeforeCaret,
+  emojiImage,
+  getComposerText,
+  insertAtCaret,
+  insertTextAtCaret,
+  rangeAtTextOffset,
+  setComposerText,
+} from "@/lib/composer";
 import { MessageItem } from "./MessageItem";
 import { MessagePanel } from "./MessagePanel";
 import { MentionMenu } from "./MentionMenu";
@@ -236,49 +245,7 @@ export function ChatArea({ onJoinVoice, dmCall }: ChatAreaProps) {
 
   // Insert a DOM node at the current cursor position inside the div.
   const insertAtCursor = (node: Node) => {
-    const div = inputRef.current;
-    if (!div) return;
-    const sel = window.getSelection();
-    if (sel && sel.rangeCount > 0 && div.contains(sel.getRangeAt(0).commonAncestorContainer)) {
-      const range = sel.getRangeAt(0);
-      range.deleteContents();
-      range.insertNode(node);
-      const newRange = document.createRange();
-      newRange.setStartAfter(node);
-      newRange.collapse(true);
-      sel.removeAllRanges();
-      sel.addRange(newRange);
-    } else {
-      div.appendChild(node);
-      const range = document.createRange();
-      range.selectNodeContents(div);
-      range.collapse(false);
-      window.getSelection()?.removeAllRanges();
-      window.getSelection()?.addRange(range);
-    }
-  };
-
-  // Find the Range at a text-character offset within the div (ignores img/br).
-  const findRangeAtOffset = (div: HTMLElement, targetOffset: number): Range | null => {
-    let pos = 0;
-    const range = document.createRange();
-    const walk = (node: Node): boolean => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        const len = (node.textContent ?? "").length;
-        if (pos + len >= targetOffset) {
-          range.setStart(node, targetOffset - pos);
-          range.collapse(true);
-          return true;
-        }
-        pos += len;
-      } else {
-        for (const child of Array.from(node.childNodes)) {
-          if (walk(child)) return true;
-        }
-      }
-      return false;
-    };
-    return walk(div) ? range : null;
+    if (inputRef.current) insertAtCaret(inputRef.current, node);
   };
 
   // The open panel lives in the store so the layout can make room for it; the
@@ -835,27 +802,10 @@ export function ChatArea({ onJoinVoice, dmCall }: ChatAreaProps) {
       }
     }
     // Backspace: manually delete an img element if the browser can't
-    if (e.key === "Backspace" && inputRef.current) {
-      const sel = window.getSelection();
-      if (sel && sel.isCollapsed && sel.rangeCount > 0) {
-        const range = sel.getRangeAt(0);
-        const container = range.startContainer;
-        const offset = range.startOffset;
-        let imgToRemove: Node | null = null;
-        if (container === inputRef.current && offset > 0) {
-          const child = container.childNodes[offset - 1];
-          if (child && (child as Element).tagName === "IMG") imgToRemove = child;
-        } else if (container.nodeType === Node.TEXT_NODE && offset === 0) {
-          const prev = container.previousSibling;
-          if (prev && (prev as Element).tagName === "IMG") imgToRemove = prev;
-        }
-        if (imgToRemove) {
-          e.preventDefault();
-          imgToRemove.parentNode?.removeChild(imgToRemove);
-          syncFromDiv();
-          return;
-        }
-      }
+    if (e.key === "Backspace" && inputRef.current && deleteImageBeforeCaret(inputRef.current)) {
+      e.preventDefault();
+      syncFromDiv();
+      return;
     }
     // ArrowUp on empty input: edit most recent own message
     if (e.key === "ArrowUp" && !emojiAutocompleteOpen && !mentionOpen) {
@@ -979,7 +929,7 @@ export function ChatArea({ onJoinVoice, dmCall }: ChatAreaProps) {
       const lastAt = before.lastIndexOf("@");
       if (lastAt === -1) return;
       // Build a range spanning from @ to current cursor
-      const atRange = findRangeAtOffset(div, lastAt);
+      const atRange = rangeAtTextOffset(div, lastAt);
       if (!atRange) return;
       atRange.setEnd(range.startContainer, range.startOffset);
       atRange.deleteContents();
@@ -1013,7 +963,7 @@ export function ChatArea({ onJoinVoice, dmCall }: ChatAreaProps) {
       const lastColon = before.lastIndexOf(":");
       if (lastColon === -1) return;
       // Build a range from the : to the current cursor
-      const colonRange = findRangeAtOffset(div, lastColon);
+      const colonRange = rangeAtTextOffset(div, lastColon);
       if (!colonRange) return;
       colonRange.setEnd(range.startContainer, range.startOffset);
       colonRange.deleteContents();
@@ -1232,29 +1182,7 @@ export function ChatArea({ onJoinVoice, dmCall }: ChatAreaProps) {
     const text = e.clipboardData.getData("text/plain");
     if (!text) return;
 
-    // Split on :emoji{url}: markers and insert text nodes + img elements
-    const emojiMarkerRegex = /:emoji\{([^}]+)\}:/g;
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = emojiMarkerRegex.exec(text)) !== null) {
-      // Insert any plain text before this marker
-      if (match.index > lastIndex) {
-        insertAtCursor(document.createTextNode(text.slice(lastIndex, match.index)));
-      }
-      // Insert the emoji as an inline image
-      const url = match[1];
-      const img = document.createElement("img");
-      img.src = url;
-      img.dataset.emojiUrl = url;
-      img.alt = `:emoji{${url}}:`;
-      img.className = "inline-block h-5 w-5 object-contain align-middle mx-0.5";
-      insertAtCursor(img);
-      lastIndex = match.index + match[0].length;
-    }
-    // Insert any remaining plain text after the last marker
-    if (lastIndex < text.length) {
-      insertAtCursor(document.createTextNode(text.slice(lastIndex)));
-    }
+    if (inputRef.current) insertTextAtCaret(inputRef.current, text);
     syncFromDiv();
   };
 

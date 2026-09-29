@@ -5,6 +5,16 @@ import { apiSendThreadMessage } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { MessageItem } from "./MessageItem";
 import { MentionMenu } from "./MentionMenu";
+import {
+  deleteImageBeforeCaret,
+  emojiImage,
+  getComposerText,
+  insertAtCaret,
+  insertTextAtCaret,
+  replaceBeforeCaret,
+  setComposerText,
+  textBeforeCaret,
+} from "@/lib/composer";
 import { findMentionMatches } from "@/lib/mentions";
 import { displayUserId } from "@/lib/utils";
 import { AuthAvatarImage } from "./AuthImage";
@@ -42,7 +52,7 @@ export function ThreadPanel() {
     clear: clearPendingFiles,
   } = usePendingFiles();
   const outgoing = useOutgoingUploads();
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inputRef = useRef<HTMLDivElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -86,6 +96,7 @@ export function ThreadPanel() {
     if (!roomId || !threadEventId) return;
     const replyTo = state.threadReplyingTo?.event_id;
     setBody("");
+    setComposerText(inputRef.current, "");
     setMentionSearch(null);
     cancelReply();
 
@@ -118,29 +129,37 @@ export function ThreadPanel() {
   );
 
   /** Open the mention menu when the caret sits just after "@" or "@word". */
-  const detectMention = (value: string, caret: number) => {
-    const match = /(?:^|\s)@(\w*)$/.exec(value.slice(0, caret));
+  const detectMention = () => {
+    const div = inputRef.current;
+    const before = div ? textBeforeCaret(div) : null;
+    const match = before === null ? null : /(?:^|\s)@(\w*)$/.exec(before);
     setMentionSearch(match ? match[1] : null);
     setSelectedMentionIdx(0);
   };
 
-  const completeMention = (name: string) => {
-    const el = inputRef.current;
-    if (!name || !el) return;
-    const caret = el.selectionStart ?? body.length;
-    const at = body.lastIndexOf("@", caret - 1);
-    if (at === -1) return;
-    const inserted = `@${name} `;
-    const next = body.slice(0, at) + inserted + body.slice(caret);
-    setBody(next);
-    setMentionSearch(null);
-    requestAnimationFrame(() => {
-      el.focus();
-      el.setSelectionRange(at + inserted.length, at + inserted.length);
-    });
+  const handleInput = () => {
+    const div = inputRef.current;
+    if (!div) return;
+    // Emptied by hand, a contenteditable keeps a stray <br>, which would
+    // hide the placeholder.
+    if (getComposerText(div) === "" && !div.querySelector("img")) div.innerHTML = "";
+    setBody(getComposerText(div));
+    detectMention();
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+  const completeMention = (name: string) => {
+    const div = inputRef.current;
+    if (!name || !div) return;
+    const before = textBeforeCaret(div);
+    const at = before?.lastIndexOf("@") ?? -1;
+    if (at === -1) return;
+    replaceBeforeCaret(div, at, `@${name} `);
+    setMentionSearch(null);
+    setBody(getComposerText(div));
+    div.focus();
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (mentionSearch !== null && mentionMatches.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -163,6 +182,11 @@ export function ThreadPanel() {
         return;
       }
     }
+    if (e.key === "Backspace" && inputRef.current && deleteImageBeforeCaret(inputRef.current)) {
+      e.preventDefault();
+      setBody(getComposerText(inputRef.current));
+      return;
+    }
     if (e.key === "Escape" && threadReplyingTo) {
       e.preventDefault();
       cancelReply();
@@ -175,19 +199,16 @@ export function ThreadPanel() {
   };
 
   const insertEmoji = useCallback((emoji: string) => {
-    // A custom emoji arrives as its image URL. Sent bare it is just a link and
-    // renders as a full-size image; the marker is what draws it inline.
-    const isImageUrl = emoji.startsWith("/") || emoji.startsWith("http");
-    const text = isImageUrl ? `:emoji{${emoji}}:` : emoji;
-    const el = inputRef.current;
-    const caret = el?.selectionStart ?? body.length;
-    setBody(body.slice(0, caret) + text + body.slice(caret));
+    const div = inputRef.current;
     setEmojiOpen(false);
-    requestAnimationFrame(() => {
-      el?.focus();
-      el?.setSelectionRange(caret + text.length, caret + text.length);
-    });
-  }, [body]);
+    if (!div) return;
+    // A custom emoji arrives as its image URL, and goes in as the inline image
+    // the channel composer uses; sent bare it would be a full-size picture.
+    const isImageUrl = emoji.startsWith("/") || emoji.startsWith("http");
+    insertAtCaret(div, isImageUrl ? emojiImage(emoji) : document.createTextNode(emoji));
+    setBody(getComposerText(div));
+    div.focus();
+  }, []);
 
 
   /** Stage files on the composer; nothing is uploaded or sent until Send. */
@@ -226,7 +247,16 @@ export function ThreadPanel() {
     if (files.length > 0) {
       e.preventDefault();
       stageFiles(files);
+      return;
     }
+    // Plain text only, but with emoji markers turned back into images.
+    e.preventDefault();
+    const text = e.clipboardData.getData("text/plain");
+    const div = inputRef.current;
+    if (!text || !div) return;
+    insertTextAtCaret(div, text);
+    setBody(getComposerText(div));
+    detectMention();
   }, [stageFiles]);
 
   // Drag-and-drop file upload
@@ -605,18 +635,17 @@ export function ThreadPanel() {
           >
             <Paperclip className="h-4 w-4" />
           </button>
-          <textarea
+          <div
             ref={inputRef}
-            className="flex-1 resize-none bg-transparent text-sm outline-none placeholder:text-muted-foreground max-h-24 min-h-[1.25rem] self-center"
-            placeholder="Reply in thread…"
-            value={body}
-            rows={1}
-            onChange={(e) => {
-              setBody(e.target.value);
-              detectMention(e.target.value, e.target.selectionStart ?? e.target.value.length);
-              e.target.style.height = "auto";
-              e.target.style.height = `${Math.min(e.target.scrollHeight, 96)}px`;
-            }}
+            contentEditable
+            role="textbox"
+            aria-multiline="true"
+            aria-label="Reply in thread"
+            data-placeholder="Reply in thread…"
+            suppressContentEditableWarning
+            className="flex-1 min-w-0 bg-transparent text-sm outline-none max-h-24 min-h-[1.25rem] overflow-y-auto break-words self-center empty:before:content-[attr(data-placeholder)] empty:before:text-muted-foreground empty:before:pointer-events-none"
+            style={{ wordBreak: "break-word", whiteSpace: "pre-wrap", lineHeight: "20px" }}
+            onInput={handleInput}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             onBlur={() => setMentionSearch(null)}
