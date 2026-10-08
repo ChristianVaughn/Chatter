@@ -208,6 +208,8 @@ pub(crate) struct SetNameColorRequest {
 
 #[derive(Deserialize)]
 pub(crate) struct CreateForumPostRequest {
+    /// The forum channel to post in. Required when the room has any.
+    pub(crate) channel_id: Option<String>,
     pub(crate) title: String,
     pub(crate) body: String,
     /// Superseded by `image_urls`; still accepted so a client that predates
@@ -244,6 +246,7 @@ pub(crate) struct EditForumCommentRequest {
 
 #[derive(Deserialize)]
 pub(crate) struct ForumPostsQuery {
+    pub(crate) channel_id: Option<String>,
     pub(crate) limit: Option<i64>,
     pub(crate) before: Option<i64>,
     pub(crate) sort: Option<String>,
@@ -251,6 +254,7 @@ pub(crate) struct ForumPostsQuery {
 
 #[derive(Deserialize)]
 pub(crate) struct ForumSearchQuery {
+    pub(crate) channel_id: Option<String>,
     pub(crate) q: String,
     pub(crate) limit: Option<i64>,
 }

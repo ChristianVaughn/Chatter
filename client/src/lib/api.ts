@@ -2102,6 +2102,8 @@ export async function apiAddToDM(roomId: string, userId: string) {
 export interface ForumPost {
   post_id: string;
   room_id: string;
+  /** The forum channel it was posted in; empty in a room that is a forum itself. */
+  channel_id?: string;
   author: string;
   title: string;
   body: string;
@@ -2169,12 +2171,14 @@ export async function apiCreateForumPost(
   imageUrls: string[] = [],
   videoUrls: string[] = [],
   fileUrls: string[] = [],
+  channelId?: string | null,
 ) {
   const res = await authenticatedFetch(`/api/forum/${roomId}/posts`, {
     method: "POST",
     // image_url as well as image_urls: a server that predates multi-image posts
     // reads the first one and ignores the rest, rather than storing nothing.
     body: JSON.stringify({
+      channel_id: channelId || undefined,
       title,
       body,
       image_url: imageUrls[0],
@@ -2190,10 +2194,19 @@ export async function apiCreateForumPost(
   return res.json() as Promise<{ post_id: string }>;
 }
 
-export async function apiListForumPosts(roomId: string, limit?: number, before?: number, sort?: string) {
+/** One forum channel's posts. No channel is the room itself, for a room that
+ *  is a forum and has no forum channels. */
+export async function apiListForumPosts(
+  roomId: string,
+  limit?: number,
+  before?: number,
+  sort?: string,
+  channelId?: string | null,
+) {
   let url = `/api/forum/${roomId}/posts?limit=${limit || 20}`;
   if (before !== undefined) url += `&before=${before}`;
   if (sort) url += `&sort=${sort}`;
+  if (channelId) url += `&channel_id=${encodeURIComponent(channelId)}`;
   const res = await authenticatedFetch(url);
   if (!res.ok) throw new Error("Failed to load posts");
   return res.json() as Promise<{ posts: ForumPost[]; has_more: boolean }>;
@@ -2254,9 +2267,15 @@ export async function apiDeleteForumComment(roomId: string, postId: string, comm
   return res.json();
 }
 
-export async function apiSearchForumPosts(roomId: string, query: string, limit?: number) {
+export async function apiSearchForumPosts(
+  roomId: string,
+  query: string,
+  limit?: number,
+  channelId?: string | null,
+) {
   const params = new URLSearchParams({ q: query });
   if (limit) params.set("limit", String(limit));
+  if (channelId) params.set("channel_id", channelId);
   const res = await authenticatedFetch(`/api/forum/${roomId}/posts/search?${params}`);
   if (!res.ok) throw new Error("Failed to search posts");
   return res.json() as Promise<{ posts: ForumPost[] }>;

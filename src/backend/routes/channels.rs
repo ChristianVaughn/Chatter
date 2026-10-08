@@ -568,6 +568,23 @@ pub(crate) async fn delete_channel(
         .delete_many(doc! { "room_id": &room_id, "channel_id": &channel_id })
         .await;
 
+    // A forum channel's posts are its own, so they and their comments go too —
+    // left behind they would belong to no channel's list.
+    let posts_coll = state
+        .db
+        .collection::<mongodb::bson::Document>("forum_posts");
+    let post_filter = doc! { "room_id": &room_id, "channel_id": &channel_id };
+    if let Ok(post_ids) = posts_coll.distinct("_id", post_filter.clone()).await {
+        if !post_ids.is_empty() {
+            let _ = state
+                .db
+                .collection::<mongodb::bson::Document>("forum_comments")
+                .delete_many(doc! { "post_id": { "$in": post_ids } })
+                .await;
+            let _ = posts_coll.delete_many(post_filter).await;
+        }
+    }
+
     // Remove voice channel state for this channel
     {
         let mut vc = state.voice_channels.write().await;

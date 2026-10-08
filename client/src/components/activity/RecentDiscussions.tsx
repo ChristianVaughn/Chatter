@@ -80,6 +80,7 @@ export function RecentDiscussions({ refreshKey }: RecentDiscussionsProps) {
           replies: post.comment_count,
           ts: post.last_activity || post.created_at,
           postId: post.post_id,
+          channelId: post.channel_id || undefined,
         })),
         ...threadPages.flat().map(({ roomId, thread }) => ({
           key: `thread:${thread.event_id}`,
@@ -111,7 +112,12 @@ export function RecentDiscussions({ refreshKey }: RecentDiscussionsProps) {
       await selectRoom(item.roomId);
     }
     if (item.kind === "forum") {
-      if (item.postId) requestForumPost(item.roomId, item.postId);
+      // A post in a forum channel opens in that channel, not whichever one
+      // selecting the room landed on.
+      if (item.channelId && item.channelId !== state.currentChannelId) {
+        await selectChannel(item.channelId);
+      }
+      if (item.postId) requestForumPost(item.roomId, item.postId, item.channelId ?? null);
       return;
     }
     // selectRoom lands on the room's first text channel, which may not be the

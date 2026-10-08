@@ -87,6 +87,9 @@ pub async fn build_state() -> Arc<AppState> {
     // Fold legacy channel view_roles/write_roles into the overwrite model
     migrate_channel_overwrites(&db).await;
 
+    // Give forum posts written before channels kept their own a channel
+    migrate_forum_post_channels(&db).await;
+
     // Build thread records for threads that predate the collection
     backfill_thread_records(&db).await;
 
@@ -482,6 +485,15 @@ async fn create_indexes(db: &mongodb::Database) {
                 .build(),
         )
         .await;
+    // ...and one forum channel's, which is what a channel's list reads.
+    let _ = db
+        .collection::<mongodb::bson::Document>("forum_posts")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "room_id": 1, "channel_id": 1, "deleted": 1 })
+                .build(),
+        )
+        .await;
 
     // forum_comments: one post's comments in the order they were written
     let _ = db
@@ -555,6 +567,43 @@ async fn migrate_channel_overwrites(db: &mongodb::Database) {
                 doc! { "_id": &channel_id },
                 doc! { "$set": { "overwrites": bson, "overwrites_migrated": true } },
             )
+            .await;
+    }
+}
+
+/// Posts written before a post recorded its channel were listed in every
+/// forum channel of their room. They are given the room's first forum channel,
+/// which is the closest thing to where they were written: nothing recorded it.
+///
+/// Idempotent: only posts with no channel are touched, and a room with no forum
+/// channels (a room that is a forum itself) leaves its posts channel-less,
+/// which is where its list looks for them.
+async fn migrate_forum_post_channels(db: &mongodb::Database) {
+    use crate::backend::state::ChannelRecord;
+    use mongodb::bson::doc;
+
+    let posts = db.collection::<mongodb::bson::Document>("forum_posts");
+    let unassigned = doc! { "channel_id": { "$in": [null, ""] } };
+    let Ok(room_ids) = posts.distinct("room_id", unassigned.clone()).await else {
+        return;
+    };
+
+    let channels = db.collection::<ChannelRecord>("channels");
+    for room_id in room_ids {
+        let Some(room_id) = room_id.as_str() else {
+            continue;
+        };
+        let Ok(Some(first)) = channels
+            .find_one(doc! { "room_id": room_id, "channel_type": "forum" })
+            .sort(doc! { "position": 1 })
+            .await
+        else {
+            continue;
+        };
+        let mut filter = unassigned.clone();
+        filter.insert("room_id", room_id);
+        let _ = posts
+            .update_many(filter, doc! { "$set": { "channel_id": &first.channel_id } })
             .await;
     }
 }

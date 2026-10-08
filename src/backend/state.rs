@@ -256,6 +256,10 @@ pub(crate) struct ForumPostRecord {
     #[serde(rename = "_id")]
     pub(crate) post_id: String,
     pub(crate) room_id: String,
+    /// The forum channel the post was written in; each one lists only its own.
+    /// Empty only for a room that is a forum itself and has no forum channels.
+    #[serde(default)]
+    pub(crate) channel_id: String,
     pub(crate) author: String,
     pub(crate) title: String,
     pub(crate) body: String,

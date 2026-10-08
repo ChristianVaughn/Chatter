@@ -53,13 +53,20 @@ export function ForumArea() {
   const { state } = useAppContext();
   const roomId = state.currentRoomId;
   const roomInfo = roomId ? state.roomInfoMap[roomId] : null;
+  // Each forum channel keeps its own posts. No channel is a room that is a
+  // forum itself, whose posts belong to the room.
+  const forumChannel = state.channels.find(
+    (c) => c.channel_id === state.currentChannelId && c.channel_type === "forum",
+  );
+  const channelId = forumChannel?.channel_id ?? null;
+  const viewKey = roomId ? `${roomId}|${channelId ?? ""}` : null;
 
   const [posts, setPosts] = useState<ForumPost[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
-  const loadedRoomRef = useRef<string | null>(null);
+  const loadedViewRef = useRef<string | null>(null);
 
   // Search state
   const [searchQuery, setSearchQuery] = useState("");
@@ -79,7 +86,7 @@ export function ForumArea() {
     if (!roomId) return;
     setLoading(true);
     try {
-      const data = await apiListForumPosts(roomId, 20, before, sort);
+      const data = await apiListForumPosts(roomId, 20, before, sort, channelId);
       if (append) {
         setPosts((prev) => [...prev, ...data.posts]);
       } else {
@@ -91,20 +98,21 @@ export function ForumArea() {
     } finally {
       setLoading(false);
     }
-  }, [roomId]);
+  }, [roomId, channelId]);
 
-  // Load posts when room changes
+  // Load posts when the room or forum channel changes. A post asked for from
+  // outside (and parked until this view was the one showing) is opened here.
   useEffect(() => {
-    if (roomId && roomId !== loadedRoomRef.current) {
-      loadedRoomRef.current = roomId;
-      setSelectedPostId(null);
+    if (viewKey && viewKey !== loadedViewRef.current) {
+      loadedViewRef.current = viewKey;
+      setSelectedPostId(takePendingForumPost(roomId, channelId));
       setPosts([]);
       setSearchQuery("");
       setIsSearching(false);
       setSortMode("activity");
       loadPosts("activity");
     }
-  }, [roomId, loadPosts]);
+  }, [viewKey, roomId, channelId, loadPosts]);
 
   // Reload when sort mode changes
   const handleSortChange = (mode: SortMode) => {
@@ -134,7 +142,7 @@ export function ForumArea() {
       setIsSearching(true);
       setLoading(true);
       try {
-        const data = await apiSearchForumPosts(roomId, q);
+        const data = await apiSearchForumPosts(roomId, q, undefined, channelId);
         setPosts(data.posts);
         setHasMore(false);
       } catch {
@@ -147,13 +155,16 @@ export function ForumArea() {
     return () => {
       if (searchTimeoutRef.current) clearTimeout(searchTimeoutRef.current);
     };
-  }, [searchQuery, roomId]);
+  }, [searchQuery, roomId, channelId]);
 
   // Listen for real-time events
   useEffect(() => {
     const onPostCreated = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail.room_id === roomId && detail.post && !isSearching) {
+      // Every forum channel in the room hears the broadcast; only the one the
+      // post was written in lists it.
+      const inThisChannel = (detail.channel_id || null) === channelId;
+      if (detail.room_id === roomId && inThisChannel && detail.post && !isSearching) {
         if (sortMode === "oldest") {
           // New posts go to the end for oldest-first sort
           setPosts((prev) => [...prev, detail.post]);
@@ -215,10 +226,11 @@ export function ForumArea() {
 
     const onOpenPost = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      if (detail.roomId !== roomId) return;
+      // A post in another channel stays parked until that channel is showing.
+      if (detail.roomId !== roomId || (detail.channelId ?? null) !== channelId) return;
       // Clear the parked request too, so returning to this room later does not
       // re-open the post.
-      takePendingForumPost(roomId);
+      takePendingForumPost(roomId, channelId);
       setSelectedPostId(detail.postId);
     };
 
@@ -236,14 +248,7 @@ export function ForumArea() {
       window.removeEventListener("forum.comment.created", onCommentCreated);
       window.removeEventListener("forum.comment.deleted", onCommentDeleted);
     };
-  }, [roomId, selectedPostId, isSearching, sortMode]);
-
-  // A request that arrived before this component mounted — selecting the room
-  // is what mounts it, so the event above would have had no listener.
-  useEffect(() => {
-    const postId = takePendingForumPost(roomId);
-    if (postId) setSelectedPostId(postId);
-  }, [roomId]);
+  }, [roomId, channelId, selectedPostId, isSearching, sortMode]);
 
   const handleDeletePost = async (postId: string) => {
     if (!roomId) return;
@@ -300,9 +305,13 @@ export function ForumArea() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b shrink-0 gap-3">
         <div className="min-w-0 shrink-0">
-          <h2 className="font-semibold text-sm truncate">{roomInfo?.name || "Forum"}</h2>
-          {roomInfo?.topic && (
-            <p className="text-xs text-muted-foreground truncate">{roomInfo.topic}</p>
+          <h2 className="font-semibold text-sm truncate">
+            {forumChannel?.name || roomInfo?.name || "Forum"}
+          </h2>
+          {(forumChannel ? forumChannel.topic : roomInfo?.topic) && (
+            <p className="text-xs text-muted-foreground truncate">
+              {forumChannel ? forumChannel.topic : roomInfo?.topic}
+            </p>
           )}
         </div>
         <div className="flex items-center gap-2 flex-1 justify-end">
@@ -400,6 +409,7 @@ export function ForumArea() {
         open={createOpen}
         onOpenChange={setCreateOpen}
         roomId={roomId}
+        channelId={channelId}
       />
     </div>
   );
@@ -411,10 +421,12 @@ function CreatePostDialog({
   open,
   onOpenChange,
   roomId,
+  channelId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   roomId: string;
+  channelId: string | null;
 }) {
   const { state } = useAppContext();
   const [title, setTitle] = useState("");
@@ -483,7 +495,7 @@ function CreatePostDialog({
       const { imageUrls, videoUrls, fileUrls } = sortForumAttachments(
         outcomes.map((o) => ({ file: o.file.file, url: o.url! })),
       );
-      await apiCreateForumPost(roomId, title.trim(), body, imageUrls, videoUrls, fileUrls);
+      await apiCreateForumPost(roomId, title.trim(), body, imageUrls, videoUrls, fileUrls, channelId);
       setTitle("");
       setBody("");
       clearImages();

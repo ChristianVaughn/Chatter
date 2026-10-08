@@ -9,20 +9,22 @@
  */
 export const FORUM_POST_OPEN_EVENT = "forum.post.open";
 
-let pending: { roomId: string; postId: string } | null = null;
+/** `channelId` is the forum channel the post lives in, or null for a room
+ *  that is a forum itself. Only that channel's view collects it. */
+let pending: { roomId: string; channelId: string | null; postId: string } | null = null;
 
-export function requestForumPost(roomId: string, postId: string): void {
-  pending = { roomId, postId };
+export function requestForumPost(roomId: string, postId: string, channelId: string | null = null): void {
+  pending = { roomId, channelId, postId };
   window.dispatchEvent(
-    new CustomEvent(FORUM_POST_OPEN_EVENT, { detail: { roomId, postId } }),
+    new CustomEvent(FORUM_POST_OPEN_EVENT, { detail: { roomId, channelId, postId } }),
   );
 }
 
-/** Returns the parked post for this room, if any, and clears it. Callers must
- *  take it even when they learned of it by event, or a later visit to the room
- *  would re-open the same post. */
-export function takePendingForumPost(roomId: string | null): string | null {
-  if (!roomId || pending?.roomId !== roomId) return null;
+/** Returns the parked post for this room and channel, if any, and clears it.
+ *  Callers must take it even when they learned of it by event, or a later
+ *  visit to the room would re-open the same post. */
+export function takePendingForumPost(roomId: string | null, channelId: string | null = null): string | null {
+  if (!roomId || pending?.roomId !== roomId || pending.channelId !== channelId) return null;
   const { postId } = pending;
   pending = null;
   return postId;

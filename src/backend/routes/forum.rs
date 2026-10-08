@@ -4,8 +4,8 @@ use super::super::{
         EditForumPostRequest, ForumPostsQuery, ForumSearchQuery,
     },
     helpers::{
-        broadcast_to_room, error_response, extract_token, generate_id, get_user_from_token,
-        is_moderator_or_owner, now_millis,
+        broadcast_to_room, channel_permissions, error_response, extract_token, generate_id,
+        get_user_from_token, is_moderator_or_owner, now_millis,
     },
     state::{
         AppState, ChannelRecord, ForumCommentRecord, ForumPostRecord, ReactionRecord, RoomRecord,
@@ -74,6 +74,85 @@ async fn validate_forum_member(
     Ok(user_id)
 }
 
+/// The forum channel a request is about, checked: it must be a forum channel of
+/// this room that the caller can see. Every forum channel keeps its own posts,
+/// so this is what stops one channel's list showing another's.
+///
+/// No channel is the room itself, for a room that is a forum and has no forum
+/// channels — its posts carry an empty `channel_id`. A room that does have
+/// forum channels must name one, or a post would land in none of them.
+async fn forum_channel(
+    state: &AppState,
+    room_id: &str,
+    channel_id: Option<&str>,
+    user_id: &str,
+) -> Result<String, (StatusCode, Json<Value>)> {
+    let channel_id = channel_id.unwrap_or_default();
+    let channels_coll = state.db.collection::<ChannelRecord>("channels");
+    if channel_id.is_empty() {
+        let has_forum_channel = channels_coll
+            .find_one(doc! { "room_id": room_id, "channel_type": "forum" })
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if has_forum_channel {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "channel_id is required",
+            ));
+        }
+        return Ok(String::new());
+    }
+
+    let exists = channels_coll
+        .find_one(doc! { "_id": channel_id, "room_id": room_id, "channel_type": "forum" })
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    // One answer for both, so a private channel's id reveals nothing.
+    if !exists
+        || !channel_permissions(state, room_id, channel_id, user_id)
+            .await
+            .view_channel
+    {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "Forum channel not found",
+        ));
+    }
+    Ok(channel_id.to_string())
+}
+
+/// A post's channel as a filter value: posts from before channels kept their
+/// own have no `channel_id` at all, and `""` alone would not match them.
+fn channel_filter(channel_id: &str) -> mongodb::bson::Bson {
+    if channel_id.is_empty() {
+        mongodb::bson::bson!({ "$in": [null, ""] })
+    } else {
+        mongodb::bson::Bson::String(channel_id.to_string())
+    }
+}
+
+/// The caller may see this post: an unreadable channel's post is answered as
+/// missing, the same as one that is not there.
+async fn require_post_visible(
+    state: &AppState,
+    post: &ForumPostRecord,
+    user_id: &str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if post.channel_id.is_empty()
+        || channel_permissions(state, &post.room_id, &post.channel_id, user_id)
+            .await
+            .view_channel
+    {
+        Ok(())
+    } else {
+        Err(error_response(StatusCode::NOT_FOUND, "Post not found"))
+    }
+}
+
 /// How many attachments one post or comment may carry between them, of any kind.
 /// Matches the composer's attachment limit, so the two surfaces say the same
 /// thing.
@@ -119,6 +198,7 @@ fn post_to_json(post: &ForumPostRecord, reactions: &HashMap<String, Vec<String>>
     json!({
         "post_id": post.post_id,
         "room_id": post.room_id,
+        "channel_id": post.channel_id,
         "author": post.author,
         "title": post.title,
         "body": post.body,
@@ -227,6 +307,7 @@ pub(crate) async fn create_post(
     Json(req): Json<CreateForumPostRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user_id = validate_forum_member(&state, &headers, &room_id).await?;
+    let channel_id = forum_channel(&state, &room_id, req.channel_id.as_deref(), &user_id).await?;
 
     // Validate
     let title = req.title.trim().to_string();
@@ -258,6 +339,7 @@ pub(crate) async fn create_post(
     let post = ForumPostRecord {
         post_id: post_id.clone(),
         room_id: room_id.clone(),
+        channel_id: channel_id.clone(),
         author: user_id.clone(),
         title: title.clone(),
         body: req.body.clone(),
@@ -280,6 +362,7 @@ pub(crate) async fn create_post(
     let broadcast_msg = json!({
         "type": "forum.post.created",
         "room_id": room_id,
+        "channel_id": channel_id,
         "post": post_json,
     });
     broadcast_to_room(&state, &room_id, &broadcast_msg).await;
@@ -295,7 +378,8 @@ pub(crate) async fn list_posts(
     headers: HeaderMap,
     Query(query): Query<ForumPostsQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _user_id = validate_forum_member(&state, &headers, &room_id).await?;
+    let user_id = validate_forum_member(&state, &headers, &room_id).await?;
+    let channel_id = forum_channel(&state, &room_id, query.channel_id.as_deref(), &user_id).await?;
 
     let limit = query.limit.unwrap_or(20).min(50);
     let coll = state.db.collection::<ForumPostRecord>("forum_posts");
@@ -309,12 +393,15 @@ pub(crate) async fn list_posts(
     };
 
     let cursor_field = sort_field;
-    let filter = if let Some(before) = query.before {
-        let op = if sort_dir == -1 { "$lt" } else { "$gt" };
-        doc! { "room_id": &room_id, "deleted": false, cursor_field: { op: before } }
-    } else {
-        doc! { "room_id": &room_id, "deleted": false }
+    let mut filter = doc! {
+        "room_id": &room_id,
+        "channel_id": channel_filter(&channel_id),
+        "deleted": false,
     };
+    if let Some(before) = query.before {
+        let op = if sort_dir == -1 { "$lt" } else { "$gt" };
+        filter.insert(cursor_field, doc! { op: before });
+    }
 
     let mut posts: Vec<Value> = Vec::new();
     if let Ok(mut cursor) = coll
@@ -346,7 +433,7 @@ pub(crate) async fn get_post(
     Path((room_id, post_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _user_id = validate_forum_member(&state, &headers, &room_id).await?;
+    let user_id = validate_forum_member(&state, &headers, &room_id).await?;
 
     let coll = state.db.collection::<ForumPostRecord>("forum_posts");
     let post = coll
@@ -355,6 +442,7 @@ pub(crate) async fn get_post(
         .ok()
         .flatten()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Post not found"))?;
+    require_post_visible(&state, &post, &user_id).await?;
 
     let reactions = get_reactions_for_event(&state, &post_id).await;
 
@@ -420,6 +508,7 @@ pub(crate) async fn delete_post(
     let broadcast_msg = json!({
         "type": "forum.post.deleted",
         "room_id": room_id,
+        "channel_id": post.channel_id,
         "post_id": post_id,
     });
     broadcast_to_room(&state, &room_id, &broadcast_msg).await;
@@ -439,12 +528,13 @@ pub(crate) async fn create_comment(
 
     // Check post exists
     let posts_coll = state.db.collection::<ForumPostRecord>("forum_posts");
-    let _post = posts_coll
+    let post = posts_coll
         .find_one(doc! { "_id": &post_id, "room_id": &room_id, "deleted": false })
         .await
         .ok()
         .flatten()
         .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Post not found"))?;
+    require_post_visible(&state, &post, &user_id).await?;
 
     if req.body.trim().is_empty() || req.body.len() > 2000 {
         return Err(error_response(
@@ -518,6 +608,7 @@ pub(crate) async fn create_comment(
     let broadcast_msg = json!({
         "type": "forum.comment.created",
         "room_id": room_id,
+        "channel_id": post.channel_id,
         "post_id": post_id,
         "comment": comment_json,
     });
@@ -648,6 +739,7 @@ pub(crate) async fn edit_post(
     let broadcast_msg = json!({
         "type": "forum.post.edited",
         "room_id": room_id,
+        "channel_id": post.channel_id,
         "post_id": post_id,
         "title": new_title,
         "body": new_body,
@@ -719,7 +811,8 @@ pub(crate) async fn search_posts(
     headers: HeaderMap,
     Query(query): Query<ForumSearchQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let _user_id = validate_forum_member(&state, &headers, &room_id).await?;
+    let user_id = validate_forum_member(&state, &headers, &room_id).await?;
+    let channel_id = forum_channel(&state, &room_id, query.channel_id.as_deref(), &user_id).await?;
 
     let q = query.q.trim().to_lowercase();
     if q.is_empty() {
@@ -729,7 +822,11 @@ pub(crate) async fn search_posts(
     let limit = query.limit.unwrap_or(20).min(50) as usize;
     let coll = state.db.collection::<ForumPostRecord>("forum_posts");
 
-    let filter = doc! { "room_id": &room_id, "deleted": false };
+    let filter = doc! {
+        "room_id": &room_id,
+        "channel_id": channel_filter(&channel_id),
+        "deleted": false,
+    };
     let mut results: Vec<Value> = Vec::new();
 
     if let Ok(mut cursor) = coll.find(filter).sort(doc! { "last_activity": -1 }).await {
