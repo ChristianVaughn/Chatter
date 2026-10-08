@@ -87,6 +87,7 @@ pub(crate) async fn list_channels(
             "system_channel": ch.system_channel,
             "bot_id": ch.bot_id,
             "voice_bitrate": ch.voice_bitrate,
+            "forum_tags": serde_json::to_value(&ch.forum_tags).unwrap_or_default(),
             "created_by": ch.created_by,
             "created_at": ch.created_at,
         }));
@@ -280,6 +281,7 @@ pub(crate) async fn create_channel(
         system_channel: false,
         bot_id: req.bot_id.unwrap_or_default(),
         voice_bitrate: VOICE_BITRATE_DEFAULT,
+        forum_tags: vec![],
         created_by: user_id.clone(),
         created_at: now_millis(),
     };
@@ -657,6 +659,7 @@ pub(crate) async fn ensure_default_channels(
             system_channel: false,
             bot_id: String::new(),
             voice_bitrate: VOICE_BITRATE_DEFAULT,
+            forum_tags: vec![],
             created_by: creator.to_string(),
             created_at: now_millis(),
         })
@@ -685,6 +688,7 @@ pub(crate) async fn ensure_default_channels(
             system_channel: false,
             bot_id: String::new(),
             voice_bitrate: VOICE_BITRATE_DEFAULT,
+            forum_tags: vec![],
             created_by: creator.to_string(),
             created_at: now_millis(),
         })

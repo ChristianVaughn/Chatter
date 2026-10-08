@@ -1545,6 +1545,7 @@ mod tests {
             system_channel: false,
             bot_id: String::new(),
             voice_bitrate: 64_000,
+            forum_tags: vec![],
             created_by: "@a:h".to_string(),
             created_at: 0,
         }

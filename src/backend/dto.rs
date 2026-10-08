@@ -210,6 +210,8 @@ pub(crate) struct SetNameColorRequest {
 pub(crate) struct CreateForumPostRequest {
     /// The forum channel to post in. Required when the room has any.
     pub(crate) channel_id: Option<String>,
+    /// Tag ids from that channel's `forum_tags`.
+    pub(crate) tags: Option<Vec<String>>,
     pub(crate) title: String,
     pub(crate) body: String,
     /// Superseded by `image_urls`; still accepted so a client that predates
@@ -237,6 +239,22 @@ pub(crate) struct CreateForumCommentRequest {
 pub(crate) struct EditForumPostRequest {
     pub(crate) title: Option<String>,
     pub(crate) body: Option<String>,
+    /// The post's whole tag set, replacing what it had.
+    pub(crate) tags: Option<Vec<String>>,
+}
+
+/// One tag in a forum channel's set. `tag_id` absent is a new tag.
+#[derive(Deserialize)]
+pub(crate) struct ForumTagInput {
+    pub(crate) tag_id: Option<String>,
+    pub(crate) name: String,
+    pub(crate) color: Option<String>,
+}
+
+/// A forum channel's whole tag set, replacing what it had.
+#[derive(Deserialize)]
+pub(crate) struct SetForumTagsRequest {
+    pub(crate) tags: Vec<ForumTagInput>,
 }
 
 #[derive(Deserialize)]
@@ -247,6 +265,8 @@ pub(crate) struct EditForumCommentRequest {
 #[derive(Deserialize)]
 pub(crate) struct ForumPostsQuery {
     pub(crate) channel_id: Option<String>,
+    /// Only posts wearing this tag.
+    pub(crate) tag: Option<String>,
     pub(crate) limit: Option<i64>,
     pub(crate) before: Option<i64>,
     pub(crate) sort: Option<String>,

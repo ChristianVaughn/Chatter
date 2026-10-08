@@ -7,7 +7,6 @@ import {
   apiEditForumPost,
   apiEditForumComment,
   apiUploadFile,
-  apiAddReaction,
   forumImages,
   forumVideos,
   forumFiles,
@@ -15,7 +14,6 @@ import {
   type ForumComment,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button"
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { cn, displayUserId } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -29,7 +27,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { EmojiPicker } from "@/components/EmojiPicker";
+import { ForumReactions } from "@/components/ForumReactions";
+import { ForumTagList, ForumTagPicker } from "@/components/ForumTags";
 import { ForumMarkdown } from "@/components/ForumMarkdown";
 import { ForumMediaGallery, StagedForumFile } from "@/components/ForumMediaGallery";
 import { usePendingFiles, MAX_ATTACHMENTS } from "@/hooks/usePendingFiles";
@@ -43,10 +42,6 @@ import { UploadProgressOverlay } from "@/components/UploadProgressOverlay";
 import { toast } from "sonner";
 import { useConfirm } from "@/components/ConfirmDialog";
 import { scrollBehavior } from "@/lib/theme/display";
-
-function isCustomEmojiUrl(s: string) {
-  return s.startsWith("/") || s.startsWith("http");
-}
 
 function formatTime(ts: number) {
   const d = new Date(ts);
@@ -63,10 +58,12 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
   const confirm = useConfirm();
   const { state } = useAppContext();
   const [post, setPost] = useState<ForumPost | null>(null);
+  // The tags the post's channel offers, kept live by the channel update.
+  const channelTags =
+    state.channels.find((c) => c.channel_id === post?.channel_id)?.forum_tags ?? [];
   const [comments, setComments] = useState<ForumComment[]>([]);
   const [commentBody, setCommentBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const commentInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -87,6 +84,7 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
   const [editingPost, setEditingPost] = useState(false);
   const [editPostTitle, setEditPostTitle] = useState("");
   const [editPostBody, setEditPostBody] = useState("");
+  const [editPostTags, setEditPostTags] = useState<string[]>([]);
   const [savingPost, setSavingPost] = useState(false);
 
   // Edit state for comments (keyed by comment_id)
@@ -200,6 +198,7 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
                 ...prev,
                 title: detail.title ?? prev.title,
                 body: detail.body ?? prev.body,
+                tags: detail.tags ?? prev.tags,
                 edited: true,
                 edited_at: detail.edited_at ?? prev.edited_at,
               }
@@ -323,14 +322,6 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
     }
   };
 
-  const handleReaction = async (emoji: string) => {
-    try {
-      await apiAddReaction(roomId, postId, emoji);
-      loadPost();
-    } catch {}
-    setShowEmojiPicker(false);
-  };
-
   const handleCommentImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const picked = Array.from(e.target.files ?? []);
     e.target.value = "";
@@ -370,6 +361,8 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
     if (!post) return;
     setEditPostTitle(post.title);
     setEditPostBody(post.body);
+    // Only tags the channel still offers: one it dropped could not be saved.
+    setEditPostTags((post.tags ?? []).filter((id) => channelTags.some((t) => t.tag_id === id)));
     setEditingPost(true);
   };
 
@@ -383,7 +376,7 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
     if (!post || !editPostTitle.trim()) return;
     setSavingPost(true);
     try {
-      await apiEditForumPost(roomId, postId, editPostTitle.trim(), editPostBody);
+      await apiEditForumPost(roomId, postId, editPostTitle.trim(), editPostBody, editPostTags);
       setEditingPost(false);
     } catch (e: any) {
       toast.error(e.message || "Failed to edit post");
@@ -427,13 +420,6 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
 
   const authorDisplay = displayUserId(post.author);
   const isPostAuthor = post.author === state.userId;
-  const reactionEntries = Object.entries(post.reactions || {});
-  const customEmojis = state.currentRoomId
-    ? (state.roomInfoMap[state.currentRoomId]?.custom_emojis ?? [])
-    : [];
-  const emojiAliases = state.currentRoomId
-    ? (state.roomInfoMap[state.currentRoomId]?.emoji_aliases ?? {})
-    : {};
 
   const thread = buildCommentThread(comments, threadOrder);
 
@@ -616,6 +602,7 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
                 rows={4}
                 placeholder="Post body..."
               />
+              <ForumTagPicker tags={channelTags} value={editPostTags} onChange={setEditPostTags} />
               <div className="flex gap-2">
                 <Button size="sm" onClick={saveEditPost} disabled={savingPost || !editPostTitle.trim()} className="gap-1.5">
                   <Check className="w-3 h-3" />
@@ -639,6 +626,9 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
                     <Pencil className="w-4 h-4" />
                   </button>
                 )}
+              </div>
+              <div className="mt-2">
+                <ForumTagList tagIds={post.tags} tags={channelTags} />
               </div>
               <p className="text-sm text-muted-foreground mt-1">
                 {authorDisplay} · {formatTime(post.created_at)}
@@ -664,55 +654,7 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
             />
           )}
 
-          {/* Reactions */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {reactionEntries.map(([emoji, userIds]) =>
-              userIds.length > 0 ? (
-                <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    key={emoji}
-                    onClick={() => handleReaction(emoji)}
-                    className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs transition-colors cursor-pointer ${
-                      userIds.includes(state.userId ?? "")
-                        ? "border-primary/50 bg-primary/10"
-                        : "border-border hover:bg-accent"
-                    }`}
-                  >
-                    {isCustomEmojiUrl(emoji) ? (
-                      <img src={emoji} alt="emoji" className="inline-block h-4 w-4 object-contain" />
-                    ) : (
-                      emoji
-                    )}
-                    <span className="text-muted-foreground font-medium">{userIds.length}</span>
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {userIds.map(id => (
-                    <p key={id}>{displayUserId(id)}</p>
-                  ))}
-                </TooltipContent>
-              </Tooltip>
-              ) : null
-            )}
-            <div className="relative">
-              <button
-                onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-                className="inline-flex items-center justify-center rounded-full border border-dashed border-border px-2 py-0.5 text-xs text-muted-foreground hover:bg-accent transition-colors cursor-pointer"
-              >
-                +
-              </button>
-              {showEmojiPicker && (
-                <div className="absolute top-full left-0 mt-1 z-50 rounded-md border bg-popover shadow-md">
-                  <EmojiPicker
-                    onSelect={handleReaction}
-                    roomCustomEmojis={customEmojis}
-                    emojiAliases={emojiAliases}
-                  />
-                </div>
-              )}
-            </div>
-          </div>
+          <ForumReactions post={post} />
 
           {/* Discussion — behind the post, not beside it: a rule, a quieter
               heading, and a fold, so the page is the post first. */}

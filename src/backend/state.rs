@@ -251,6 +251,17 @@ pub(crate) struct ThreadRecord {
     pub(crate) created_at: i64,
 }
 
+/// One tag a forum channel offers. A post holds the `tag_id`, so renaming a
+/// tag or changing its colour reaches every post already wearing it.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct ForumTag {
+    pub(crate) tag_id: String,
+    pub(crate) name: String,
+    /// `#rrggbb`, or empty for the neutral chip.
+    #[serde(default)]
+    pub(crate) color: String,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct ForumPostRecord {
     #[serde(rename = "_id")]
@@ -260,6 +271,10 @@ pub(crate) struct ForumPostRecord {
     /// Empty only for a room that is a forum itself and has no forum channels.
     #[serde(default)]
     pub(crate) channel_id: String,
+    /// Ids from the channel's `forum_tags`. A tag the channel has since
+    /// dropped is left here and simply no longer drawn.
+    #[serde(default)]
+    pub(crate) tags: Vec<String>,
     pub(crate) author: String,
     pub(crate) title: String,
     pub(crate) body: String,
@@ -722,6 +737,10 @@ pub(crate) struct ChannelRecord {
     pub(crate) bot_id: String, // non-empty only for channel_type == "bot"
     #[serde(default = "default_voice_bitrate")]
     pub(crate) voice_bitrate: i32, // Opus target bitrate in bps, voice channels only
+    /// The tags a forum channel's posts may carry, set by whoever created the
+    /// channel (or anyone who can manage channels). Forum channels only.
+    #[serde(default)]
+    pub(crate) forum_tags: Vec<ForumTag>,
     pub(crate) created_by: String,
     pub(crate) created_at: i64,
 }

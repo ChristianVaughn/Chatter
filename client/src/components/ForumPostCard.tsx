@@ -1,15 +1,11 @@
-import { useAppContext } from "@/lib/store";
-import { forumFiles, forumImages, forumVideos, type ForumPost } from "@/lib/api";
+import { forumFiles, forumImages, forumVideos, type ForumPost, type ForumTag } from "@/lib/api";
 import { MessageSquare, Trash2, Play, Paperclip } from "lucide-react";
 import { ForumMarkdown } from "@/components/ForumMarkdown";
 import { AuthImage } from "@/components/AuthImage";
-import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { ForumReactions } from "@/components/ForumReactions";
+import { ForumTagList } from "@/components/ForumTags";
 import { displayUserId } from "@/lib/utils";
 import { clickable } from "@/lib/a11y";
-
-function isCustomEmojiUrl(s: string) {
-  return s.startsWith("/") || s.startsWith("http");
-}
 
 function formatTime(ts: number) {
   const d = new Date(ts);
@@ -26,13 +22,12 @@ interface ForumPostCardProps {
   onClick: () => void;
   onDelete?: () => void;
   canDelete: boolean;
+  /** The channel's tags, to draw the ones this post wears. */
+  tags?: ForumTag[];
 }
 
-export function ForumPostCard({ post, onClick, onDelete, canDelete }: ForumPostCardProps) {
-  const { state, addReaction } = useAppContext();
-  const roomId = post.room_id;
+export function ForumPostCard({ post, onClick, onDelete, canDelete, tags }: ForumPostCardProps) {
   const authorDisplay = displayUserId(post.author);
-  const reactionEntries = Object.entries(post.reactions || {});
   const images = forumImages(post);
   const videos = forumVideos(post);
   const files = forumFiles(post);
@@ -89,6 +84,8 @@ export function ForumPostCard({ post, onClick, onDelete, canDelete }: ForumPostC
           )}
         </div>
 
+        <ForumTagList tagIds={post.tags} tags={tags} size="xs" />
+
         <p className="text-xs text-muted-foreground">
           {authorDisplay} · {formatTime(post.created_at)}
           {post.edited && " · (edited)"}
@@ -101,43 +98,7 @@ export function ForumPostCard({ post, onClick, onDelete, canDelete }: ForumPostC
         )}
 
         <div className="flex items-center gap-2 mt-auto pt-1">
-          {/* Reactions */}
-          {reactionEntries.length > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {reactionEntries.map(([emoji, userIds]) =>
-                userIds.length > 0 ? (
-                  <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    key={emoji}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      addReaction(post.post_id, emoji);
-                    }}
-                    className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-3xs transition-colors cursor-pointer ${
-                      userIds.includes(state.userId ?? "")
-                        ? "border-primary/50 bg-primary/10"
-                        : "border-border hover:bg-accent"
-                    }`}
-                  >
-                    {isCustomEmojiUrl(emoji) ? (
-                      <img src={emoji} alt="emoji" className="inline-block h-3 w-3 object-contain" />
-                    ) : (
-                      emoji
-                    )}
-                    <span className="text-muted-foreground font-medium">{userIds.length}</span>
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {userIds.map(id => (
-                    <p key={id}>{id}</p>
-                  ))}
-                </TooltipContent>
-              </Tooltip>
-                ) : null
-              )}
-            </div>
-          )}
+          <ForumReactions post={post} compact />
 
           {/* Downloads have no thumbnail to stand for them, so the row says
               they are there. */}

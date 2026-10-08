@@ -1057,6 +1057,8 @@ export interface Channel {
   overwrites?: PermissionOverwrite[];
   /** When true (default) the category's overwrites apply first. */
   inherit_category_permissions?: boolean;
+  /** The tags a forum channel's posts may carry. Forum channels only. */
+  forum_tags?: ForumTag[];
   /** @deprecated superseded by `overwrites`; migrated on server start. */
   view_roles?: string[];
   write_roles?: string[];
@@ -2099,11 +2101,27 @@ export async function apiAddToDM(roomId: string, userId: string) {
 
 // ─── Forum ──────────────────────────────────────────────────────────────────
 
+/** One tag a forum channel offers. Posts hold the id, so a rename reaches
+ *  every post already wearing it. */
+export interface ForumTag {
+  tag_id: string;
+  name: string;
+  /** `#rrggbb`, or empty for the neutral chip. */
+  color: string;
+}
+
+/** Limits mirrored from `routes/forum.rs`. */
+export const MAX_FORUM_TAGS = 20;
+export const MAX_POST_TAGS = 5;
+export const MAX_TAG_NAME = 24;
+
 export interface ForumPost {
   post_id: string;
   room_id: string;
   /** The forum channel it was posted in; empty in a room that is a forum itself. */
   channel_id?: string;
+  /** Ids from the channel's `forum_tags`; one the channel dropped is not drawn. */
+  tags?: string[];
   author: string;
   title: string;
   body: string;
@@ -2172,6 +2190,7 @@ export async function apiCreateForumPost(
   videoUrls: string[] = [],
   fileUrls: string[] = [],
   channelId?: string | null,
+  tags: string[] = [],
 ) {
   const res = await authenticatedFetch(`/api/forum/${roomId}/posts`, {
     method: "POST",
@@ -2179,6 +2198,7 @@ export async function apiCreateForumPost(
     // reads the first one and ignores the rest, rather than storing nothing.
     body: JSON.stringify({
       channel_id: channelId || undefined,
+      tags,
       title,
       body,
       image_url: imageUrls[0],
@@ -2202,11 +2222,13 @@ export async function apiListForumPosts(
   before?: number,
   sort?: string,
   channelId?: string | null,
+  tag?: string | null,
 ) {
   let url = `/api/forum/${roomId}/posts?limit=${limit || 20}`;
   if (before !== undefined) url += `&before=${before}`;
   if (sort) url += `&sort=${sort}`;
   if (channelId) url += `&channel_id=${encodeURIComponent(channelId)}`;
+  if (tag) url += `&tag=${encodeURIComponent(tag)}`;
   const res = await authenticatedFetch(url);
   if (!res.ok) throw new Error("Failed to load posts");
   return res.json() as Promise<{ posts: ForumPost[]; has_more: boolean }>;
@@ -2281,16 +2303,40 @@ export async function apiSearchForumPosts(
   return res.json() as Promise<{ posts: ForumPost[] }>;
 }
 
-export async function apiEditForumPost(roomId: string, postId: string, title?: string, body?: string) {
+export async function apiEditForumPost(
+  roomId: string,
+  postId: string,
+  title?: string,
+  body?: string,
+  tags?: string[],
+) {
   const res = await authenticatedFetch(`/api/forum/${roomId}/posts/${postId}`, {
     method: "PUT",
-    body: JSON.stringify({ title, body }),
+    body: JSON.stringify({ title, body, tags }),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => null);
     throw new Error(data?.error || "Failed to edit post");
   }
   return res.json();
+}
+
+/** Replace a forum channel's whole tag set. A tag sent without a `tag_id` is
+ *  new; one left out is removed. */
+export async function apiSetForumTags(
+  roomId: string,
+  channelId: string,
+  tags: { tag_id?: string; name: string; color: string }[],
+) {
+  const res = await authenticatedFetch(
+    `/api/forum/${roomId}/channels/${encodeURIComponent(channelId)}/tags`,
+    { method: "PUT", body: JSON.stringify({ tags }) },
+  );
+  if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    throw new Error(data?.error || "Failed to save tags");
+  }
+  return res.json() as Promise<{ tags: ForumTag[] }>;
 }
 
 export async function apiEditForumComment(roomId: string, postId: string, commentId: string, body: string) {

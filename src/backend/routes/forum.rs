@@ -1,14 +1,16 @@
 use super::super::{
+    audit,
     dto::{
         CreateForumCommentRequest, CreateForumPostRequest, EditForumCommentRequest,
-        EditForumPostRequest, ForumPostsQuery, ForumSearchQuery,
+        EditForumPostRequest, ForumPostsQuery, ForumSearchQuery, SetForumTagsRequest,
     },
     helpers::{
         broadcast_to_room, channel_permissions, error_response, extract_token, generate_id,
-        get_user_from_token, is_moderator_or_owner, now_millis,
+        get_user_from_token, is_moderator_or_owner, now_millis, valid_profile_color,
     },
     state::{
-        AppState, ChannelRecord, ForumCommentRecord, ForumPostRecord, ReactionRecord, RoomRecord,
+        AppState, ChannelRecord, ForumCommentRecord, ForumPostRecord, ForumTag, ReactionRecord,
+        RoomRecord,
     },
 };
 use axum::{
@@ -153,6 +155,55 @@ async fn require_post_visible(
     }
 }
 
+/// How many tags a forum channel may offer, and how many one post may wear.
+const MAX_FORUM_TAGS: usize = 20;
+const MAX_POST_TAGS: usize = 5;
+const MAX_TAG_NAME: usize = 24;
+
+/// The tags a post asks for, checked against what its channel offers: an id
+/// the channel does not have is refused rather than stored, or a post could
+/// claim a tag nobody set up. Duplicates collapse; order is the post's own.
+async fn requested_tags(
+    state: &AppState,
+    channel_id: &str,
+    requested: &Option<Vec<String>>,
+) -> Result<Vec<String>, (StatusCode, Json<Value>)> {
+    let mut tags: Vec<String> = Vec::new();
+    for id in requested.iter().flatten() {
+        if !tags.contains(id) {
+            tags.push(id.clone());
+        }
+    }
+    if tags.is_empty() {
+        return Ok(tags);
+    }
+    if tags.len() > MAX_POST_TAGS {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("A post may have at most {MAX_POST_TAGS} tags"),
+        ));
+    }
+    let offered = state
+        .db
+        .collection::<ChannelRecord>("channels")
+        .find_one(doc! { "_id": channel_id })
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.forum_tags)
+        .unwrap_or_default();
+    if !tags
+        .iter()
+        .all(|id| offered.iter().any(|t| &t.tag_id == id))
+    {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            "That tag is not one this forum offers",
+        ));
+    }
+    Ok(tags)
+}
+
 /// How many attachments one post or comment may carry between them, of any kind.
 /// Matches the composer's attachment limit, so the two surfaces say the same
 /// thing.
@@ -199,6 +250,7 @@ fn post_to_json(post: &ForumPostRecord, reactions: &HashMap<String, Vec<String>>
         "post_id": post.post_id,
         "room_id": post.room_id,
         "channel_id": post.channel_id,
+        "tags": post.tags,
         "author": post.author,
         "title": post.title,
         "body": post.body,
@@ -308,6 +360,7 @@ pub(crate) async fn create_post(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let user_id = validate_forum_member(&state, &headers, &room_id).await?;
     let channel_id = forum_channel(&state, &room_id, req.channel_id.as_deref(), &user_id).await?;
+    let tags = requested_tags(&state, &channel_id, &req.tags).await?;
 
     // Validate
     let title = req.title.trim().to_string();
@@ -340,6 +393,7 @@ pub(crate) async fn create_post(
         post_id: post_id.clone(),
         room_id: room_id.clone(),
         channel_id: channel_id.clone(),
+        tags,
         author: user_id.clone(),
         title: title.clone(),
         body: req.body.clone(),
@@ -398,6 +452,9 @@ pub(crate) async fn list_posts(
         "channel_id": channel_filter(&channel_id),
         "deleted": false,
     };
+    if let Some(tag) = query.tag.as_deref().filter(|t| !t.is_empty()) {
+        filter.insert("tags", tag);
+    }
     if let Some(before) = query.before {
         let op = if sort_dir == -1 { "$lt" } else { "$gt" };
         filter.insert(cursor_field, doc! { op: before });
@@ -724,6 +781,14 @@ pub(crate) async fn edit_post(
         new_body = post.body.clone();
     }
 
+    let new_tags = if req.tags.is_some() {
+        let tags = requested_tags(&state, &post.channel_id, &req.tags).await?;
+        set_doc.insert("tags", tags.clone());
+        tags
+    } else {
+        post.tags.clone()
+    };
+
     if set_doc.is_empty() {
         return Err(error_response(StatusCode::BAD_REQUEST, "Nothing to update"));
     }
@@ -743,6 +808,7 @@ pub(crate) async fn edit_post(
         "post_id": post_id,
         "title": new_title,
         "body": new_body,
+        "tags": new_tags,
         "edited_at": now,
     });
     broadcast_to_room(&state, &room_id, &broadcast_msg).await;
@@ -803,7 +869,126 @@ pub(crate) async fn edit_comment(
     Ok(Json(json!({ "edited": true })))
 }
 
-// ─── 9. Search Posts ────────────────────────────────────────────────────────
+// ─── 9. Set Tags ────────────────────────────────────────────────────────────
+
+/// Replace a forum channel's tag set. Whoever created the channel set it up
+/// and so decides its tags, as does anyone who can manage the room's channels
+/// — otherwise a channel whose creator left could never change them.
+///
+/// The set is sent whole. A tag keeps its id across edits, so renaming it or
+/// changing its colour changes it on every post wearing it; a tag missing from
+/// the new set is gone, and posts wearing it stop drawing it.
+pub(crate) async fn set_tags(
+    State(state): State<Arc<AppState>>,
+    Path((room_id, channel_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(req): Json<SetForumTagsRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = validate_forum_member(&state, &headers, &room_id).await?;
+
+    let channels_coll = state.db.collection::<ChannelRecord>("channels");
+    let channel = channels_coll
+        .find_one(doc! { "_id": &channel_id, "room_id": &room_id, "channel_type": "forum" })
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| error_response(StatusCode::NOT_FOUND, "Forum channel not found"))?;
+
+    let perms = channel_permissions(&state, &room_id, &channel_id, &user_id).await;
+    if !perms.view_channel {
+        return Err(error_response(
+            StatusCode::NOT_FOUND,
+            "Forum channel not found",
+        ));
+    }
+    if channel.created_by != user_id && !perms.manage_channels {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "Only the forum's creator or someone who can manage channels can set its tags",
+        ));
+    }
+
+    if req.tags.len() > MAX_FORUM_TAGS {
+        return Err(error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("A forum may have at most {MAX_FORUM_TAGS} tags"),
+        ));
+    }
+    let mut tags: Vec<ForumTag> = Vec::new();
+    for input in &req.tags {
+        let name = input.name.trim();
+        if name.is_empty() || name.chars().count() > MAX_TAG_NAME {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("A tag name must be 1-{MAX_TAG_NAME} characters"),
+            ));
+        }
+        if tags.iter().any(|t| t.name.eq_ignore_ascii_case(name)) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("There is already a tag called {name}"),
+            ));
+        }
+        let color = input.color.clone().unwrap_or_default();
+        if !valid_profile_color(&color) {
+            return Err(error_response(
+                StatusCode::BAD_REQUEST,
+                "A tag colour must be #rrggbb",
+            ));
+        }
+        // An id the channel does not already have is minted afresh rather
+        // than taken from the client: it would otherwise be free to collide.
+        let tag_id = input
+            .tag_id
+            .as_ref()
+            .filter(|id| channel.forum_tags.iter().any(|t| &t.tag_id == *id))
+            .cloned()
+            .unwrap_or_else(|| generate_id("tag"));
+        tags.push(ForumTag {
+            tag_id,
+            name: name.to_string(),
+            color,
+        });
+    }
+
+    let tags_bson = mongodb::bson::to_bson(&tags)
+        .map_err(|_| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Bad tags"))?;
+    let _ = channels_coll
+        .update_one(
+            doc! { "_id": &channel_id },
+            doc! { "$set": { "forum_tags": tags_bson } },
+        )
+        .await;
+
+    // The ordinary channel update, so every client's channel list carries the
+    // new set without a second event to handle.
+    let tags_json = serde_json::to_value(&tags).unwrap_or_default();
+    broadcast_to_room(
+        &state,
+        &room_id,
+        &json!({
+            "type": "m.channel.updated",
+            "room_id": room_id,
+            "sender": user_id,
+            "content": { "channel_id": channel_id, "forum_tags": tags_json },
+        }),
+    )
+    .await;
+
+    audit::record(
+        &state,
+        &room_id,
+        &user_id,
+        audit::AuditAction::ChannelUpdated,
+        &channel_id,
+        "changed: forum_tags",
+    )
+    .await;
+
+    Ok(Json(json!({ "tags": tags_json })))
+}
+
+// ─── 10. Search Posts ────────────────────────────────────────────────────────
 
 pub(crate) async fn search_posts(
     State(state): State<Arc<AppState>>,

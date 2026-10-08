@@ -7,7 +7,9 @@ import {
   apiSearchForumPosts,
   apiUploadFile,
   type ForumPost,
+  type ForumTag,
 } from "@/lib/api";
+import { ForumTagChip, ForumTagPicker, ManageForumTagsDialog } from "./ForumTags";
 import { ForumPostCard } from "./ForumPostCard";
 import { ForumPostView } from "./ForumPostView";
 import { FORUM_POST_OPEN_EVENT, takePendingForumPost } from "@/lib/pendingForumPost";
@@ -29,7 +31,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Plus, Paperclip, X, Search, ArrowUpDown } from "lucide-react";
+import { Plus, Paperclip, X, Search, ArrowUpDown, Tags } from "lucide-react";
 import { usePendingFiles, MAX_ATTACHMENTS } from "@/hooks/usePendingFiles";
 import { sortForumAttachments } from "@/lib/mediaTypes";
 import { StagedForumFile } from "@/components/ForumMediaGallery";
@@ -60,12 +62,21 @@ export function ForumArea() {
   );
   const channelId = forumChannel?.channel_id ?? null;
   const viewKey = roomId ? `${roomId}|${channelId ?? ""}` : null;
+  const channelTags = forumChannel?.forum_tags ?? [];
+  // Whoever set the forum up decides its tags, as does anyone who can manage
+  // the room's channels (the server checks the same two things).
+  const canManageTags =
+    !!forumChannel &&
+    (forumChannel.created_by === state.userId || !!state.myPermissions?.manage_channels);
 
   const [posts, setPosts] = useState<ForumPost[]>([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(false);
   const [selectedPostId, setSelectedPostId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [manageTagsOpen, setManageTagsOpen] = useState(false);
+  /** Only posts wearing this tag, or null for all of them. */
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
   const loadedViewRef = useRef<string | null>(null);
 
   // Search state
@@ -82,11 +93,13 @@ export function ForumArea() {
     return me?.role === "owner" || me?.role === "moderator";
   }, [state.roomMembers, state.userId]);
 
-  const loadPosts = useCallback(async (sort: SortMode, append = false, before?: number) => {
+  // The tag is passed rather than read from state: a caller that has just set
+  // the filter would otherwise load with the one before it.
+  const loadPosts = useCallback(async (sort: SortMode, append = false, before?: number, tag: string | null = null) => {
     if (!roomId) return;
     setLoading(true);
     try {
-      const data = await apiListForumPosts(roomId, 20, before, sort, channelId);
+      const data = await apiListForumPosts(roomId, 20, before, sort, channelId, tag);
       if (append) {
         setPosts((prev) => [...prev, ...data.posts]);
       } else {
@@ -110,6 +123,7 @@ export function ForumArea() {
       setSearchQuery("");
       setIsSearching(false);
       setSortMode("activity");
+      setTagFilter(null);
       loadPosts("activity");
     }
   }, [viewKey, roomId, channelId, loadPosts]);
@@ -121,7 +135,16 @@ export function ForumArea() {
     setSearchQuery("");
     setIsSearching(false);
     setPosts([]);
-    loadPosts(mode);
+    loadPosts(mode, false, undefined, tagFilter);
+  };
+
+  const handleTagFilter = (tag: string | null) => {
+    if (tag === tagFilter) return;
+    setTagFilter(tag);
+    setSearchQuery("");
+    setIsSearching(false);
+    setPosts([]);
+    loadPosts(sortMode, false, undefined, tag);
   };
 
   // Debounced search
@@ -133,7 +156,7 @@ export function ForumArea() {
     if (!q) {
       if (isSearching) {
         setIsSearching(false);
-        loadPosts(sortMode);
+        loadPosts(sortMode, false, undefined, tagFilter);
       }
       return;
     }
@@ -164,7 +187,8 @@ export function ForumArea() {
       // Every forum channel in the room hears the broadcast; only the one the
       // post was written in lists it.
       const inThisChannel = (detail.channel_id || null) === channelId;
-      if (detail.room_id === roomId && inThisChannel && detail.post && !isSearching) {
+      const passesFilter = !tagFilter || (detail.post?.tags ?? []).includes(tagFilter);
+      if (detail.room_id === roomId && inThisChannel && passesFilter && detail.post && !isSearching) {
         if (sortMode === "oldest") {
           // New posts go to the end for oldest-first sort
           setPosts((prev) => [...prev, detail.post]);
@@ -217,7 +241,7 @@ export function ForumArea() {
         setPosts((prev) =>
           prev.map((p) =>
             p.post_id === detail.post_id
-              ? { ...p, title: detail.title ?? p.title, body: detail.body ?? p.body, edited: true, edited_at: detail.edited_at }
+              ? { ...p, title: detail.title ?? p.title, body: detail.body ?? p.body, tags: detail.tags ?? p.tags, edited: true, edited_at: detail.edited_at }
               : p
           )
         );
@@ -248,7 +272,7 @@ export function ForumArea() {
       window.removeEventListener("forum.comment.created", onCommentCreated);
       window.removeEventListener("forum.comment.deleted", onCommentDeleted);
     };
-  }, [roomId, channelId, selectedPostId, isSearching, sortMode]);
+  }, [roomId, channelId, selectedPostId, isSearching, sortMode, tagFilter]);
 
   const handleDeletePost = async (postId: string) => {
     if (!roomId) return;
@@ -277,7 +301,7 @@ export function ForumArea() {
         cursor = last.last_activity;
         break;
     }
-    loadPosts(sortMode, true, cursor);
+    loadPosts(sortMode, true, cursor, tagFilter);
   };
 
   if (!roomId) {
@@ -351,12 +375,44 @@ export function ForumArea() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
+          {canManageTags && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setManageTagsOpen(true)}
+              className="gap-1.5 shrink-0 h-8 text-xs"
+              title="Set up this forum's tags"
+            >
+              <Tags className="w-3.5 h-3.5" />
+              Tags
+            </Button>
+          )}
           <Button size="sm" onClick={() => setCreateOpen(true)} className="gap-1.5 shrink-0 h-8">
             <Plus className="w-4 h-4" />
             New Post
           </Button>
         </div>
       </div>
+
+      {/* Filter by tag. Search is not filtered on the server, so its results
+          are narrowed below instead. */}
+      {channelTags.length > 0 && (
+        <div className="flex items-center gap-1 overflow-x-auto px-4 py-2 border-b shrink-0">
+          <ForumTagChip
+            tag={{ tag_id: "", name: "All", color: "" }}
+            selected={tagFilter === null}
+            onClick={() => handleTagFilter(null)}
+          />
+          {channelTags.map((t) => (
+            <ForumTagChip
+              key={t.tag_id}
+              tag={t}
+              selected={tagFilter === t.tag_id}
+              onClick={() => handleTagFilter(tagFilter === t.tag_id ? null : t.tag_id)}
+            />
+          ))}
+        </div>
+      )}
 
       {/* Posts list. Full width, like every other list in the app: a row is a
           thumbnail, a title and two lines of excerpt, and capping it at 768px
@@ -376,7 +432,9 @@ export function ForumArea() {
             </div>
           )}
 
-          {posts.map((post) => {
+          {posts
+            .filter((post) => !isSearching || !tagFilter || (post.tags ?? []).includes(tagFilter))
+            .map((post) => {
             const canDelete = post.author === state.userId || isOwnerOrMod();
             return (
               <ForumPostCard
@@ -385,6 +443,7 @@ export function ForumArea() {
                 onClick={() => setSelectedPostId(post.post_id)}
                 onDelete={() => handleDeletePost(post.post_id)}
                 canDelete={canDelete}
+                tags={channelTags}
               />
             );
           })}
@@ -410,7 +469,18 @@ export function ForumArea() {
         onOpenChange={setCreateOpen}
         roomId={roomId}
         channelId={channelId}
+        tags={channelTags}
       />
+
+      {forumChannel && (
+        <ManageForumTagsDialog
+          open={manageTagsOpen}
+          onOpenChange={setManageTagsOpen}
+          roomId={roomId}
+          channelId={forumChannel.channel_id}
+          tags={channelTags}
+        />
+      )}
     </div>
   );
 }
@@ -422,14 +492,17 @@ function CreatePostDialog({
   onOpenChange,
   roomId,
   channelId,
+  tags,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   roomId: string;
   channelId: string | null;
+  tags: ForumTag[];
 }) {
   const { state } = useAppContext();
   const [title, setTitle] = useState("");
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [body, setBody] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -495,9 +568,10 @@ function CreatePostDialog({
       const { imageUrls, videoUrls, fileUrls } = sortForumAttachments(
         outcomes.map((o) => ({ file: o.file.file, url: o.url! })),
       );
-      await apiCreateForumPost(roomId, title.trim(), body, imageUrls, videoUrls, fileUrls, channelId);
+      await apiCreateForumPost(roomId, title.trim(), body, imageUrls, videoUrls, fileUrls, channelId, selectedTags);
       setTitle("");
       setBody("");
+      setSelectedTags([]);
       clearImages();
       resetUploadProgress();
       onOpenChange(false);
@@ -582,6 +656,7 @@ function CreatePostDialog({
               rows={4}
             />
           </div>
+          <ForumTagPicker tags={tags} value={selectedTags} onChange={setSelectedTags} />
           <div className="space-y-2">
             <Label>
               Attachments (Optional)
