@@ -89,8 +89,6 @@ declare namespace chrome.cast {
     }
     class Media {
       playerState: string;
-      media: MediaInfo | null;
-      activeTrackIds: number[] | null;
       play(
         request: null,
         onSuccess: () => void,
@@ -131,14 +129,6 @@ declare namespace chrome.cast {
  * `mov_text` track embedded in the MP4 and lists it, but cannot draw it — a
  * caption that can be selected and never appears.
  */
-/**
- * Where our caption track ids start. The receiver numbers the tracks it finds
- * inside the file (the MP4's own `mov_text` captions, its audio) from 1, so a
- * sidecar numbered from 1 can share an id with one of them — and selecting it
- * then turns on the embedded track the receiver cannot draw.
- */
-const CAST_TRACK_ID_BASE = 1000;
-
 async function loadCastTracks(url: string): Promise<chrome.cast.media.Track[]> {
   if (!url.includes("/external/")) return [];
   try {
@@ -150,7 +140,7 @@ async function loadCastTracks(url: string): Promise<chrome.cast.media.Track[]> {
     return (json.tracks ?? [])
       .filter((t) => t && typeof t.src === "string")
       .map((t, i) => {
-        const track = new chrome.cast.media.Track(CAST_TRACK_ID_BASE + i, "TEXT");
+        const track = new chrome.cast.media.Track(i + 1, "TEXT");
         track.trackContentId = url + (t.src as string);
         track.trackContentType = "text/vtt";
         track.subtype = "SUBTITLES";
@@ -308,18 +298,6 @@ export function useChromecast() {
       try {
         await session.loadMedia(request);
         castingUrl.current = url;
-        if (tracks.length > 0) {
-          // What the receiver made of the captions: the tracks it lists and
-          // which are on. A sidecar it could not load shows up here as an
-          // id missing from activeTrackIds.
-          const media = session.getMediaSession();
-          console.info("Cast captions", {
-            sent: tracks.map((t) => ({ id: t.trackId, name: t.name, src: t.trackContentId })),
-            requested: request.activeTrackIds,
-            receiverTracks: media?.media?.tracks ?? null,
-            receiverActive: media?.activeTrackIds ?? null,
-          });
-        }
       } catch (e) {
         console.error("Cast loadMedia failed:", e);
       }
