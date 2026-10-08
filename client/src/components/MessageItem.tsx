@@ -467,7 +467,7 @@ function CcControls({
 }
 
 /** Lazy video — shows a first-frame thumbnail with a play button; only loads the video when clicked */
-function LazyVideo({ url, dims, onExpand, onCast, castState }: { url: string; dims?: MediaDimensions; onExpand: () => void; onCast?: (url: string) => void; castState?: string }) {
+function LazyVideo({ url, dims, onExpand, onCast, castState }: { url: string; dims?: MediaDimensions; onExpand: () => void; onCast?: (url: string, captionTrack: number | null) => void; castState?: string }) {
   const [activated, setActivated] = useState(false);
   const isLocal = url.includes("/external/");
   const thumbUrl = `${url}.thumb.jpg`;
@@ -534,7 +534,7 @@ function LazyVideo({ url, dims, onExpand, onCast, castState }: { url: string; di
         {showCast && (
           <button
             className="absolute top-1.5 right-1.5 p-1.5 rounded-md bg-black/60 hover:bg-black/80 transition-colors z-10"
-            onClick={(e) => { e.stopPropagation(); onCast(url); }}
+            onClick={(e) => { e.stopPropagation(); onCast(url, selected); }}
             title={castState === "connected" ? "Casting" : castState === "no_devices" ? "Cast — no devices found" : "Cast to Chromecast"}
           >
             <Cast className={cn("h-4 w-4", castState === "connected" ? "text-blue-400" : castState === "no_devices" ? "text-white/50" : "text-white")} />
@@ -584,7 +584,7 @@ function LazyVideo({ url, dims, onExpand, onCast, castState }: { url: string; di
       {showCast && (
         <button
           className="absolute top-1.5 right-1.5 p-1.5 rounded-md bg-black/60 hover:bg-black/80 transition-colors z-10"
-          onClick={(e) => { e.stopPropagation(); onCast(url); }}
+          onClick={(e) => { e.stopPropagation(); onCast(url, selected); }}
           title={castState === "connected" ? "Casting" : castState === "no_devices" ? "Cast — no devices found" : "Cast to Chromecast"}
         >
           <Cast className={cn("h-4 w-4", castState === "connected" ? "text-blue-400" : castState === "no_devices" ? "text-white/50" : "text-white")} />
@@ -635,7 +635,7 @@ function LightboxVideo({
 }: {
   url: string;
   castState: string;
-  castVideo: (url: string) => void;
+  castVideo: (url: string, captionTrack: number | null) => void;
   deviceName?: string;
 }) {
   const didAutoPlay = useRef(false);
@@ -669,7 +669,7 @@ function LightboxVideo({
       {showCast && (
         <button
           className="absolute top-2 right-2 p-2 rounded-md bg-black/60 hover:bg-black/80 transition-colors z-10"
-          onClick={() => castVideo(url)}
+          onClick={() => castVideo(url, selected)}
           title={castState === "connected" ? `Casting to ${deviceName}` : castState === "no_devices" ? "Cast — no devices found" : "Cast to Chromecast"}
         >
           <Cast className={cn("h-5 w-5", castState === "connected" ? "text-blue-400" : castState === "no_devices" ? "text-white/50" : "text-white")} />
@@ -919,7 +919,7 @@ const MediaPreview = memo(function MediaPreview({ body, media, hiddenBySpoiler, 
         );
       })}
       {videos.map((url) => (
-        <LazyVideo key={url} url={url} dims={media?.[url]} onExpand={() => { lightboxDidAutoPlay.current = false; setLightbox({ url, type: "video" }); }} onCast={(u) => castVideo(u)} castState={castState} />
+        <LazyVideo key={url} url={url} dims={media?.[url]} onExpand={() => { lightboxDidAutoPlay.current = false; setLightbox({ url, type: "video" }); }} onCast={(u, track) => castVideo(u, track)} castState={castState} />
       ))}
       {audios.map((url) => (
         <audio

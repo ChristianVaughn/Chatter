@@ -65,11 +65,23 @@ declare namespace chrome.cast {
       contentId: string;
       contentType: string;
       metadata: GenericMediaMetadata | null;
+      tracks: Track[] | null;
+    }
+    class Track {
+      constructor(trackId: number, trackType: string);
+      trackId: number;
+      type: string;
+      trackContentId: string;
+      trackContentType: string;
+      subtype: string;
+      name: string;
+      language: string;
     }
     class LoadRequest {
       constructor(mediaInfo: MediaInfo);
       autoplay: boolean;
       currentTime: number;
+      activeTrackIds: number[];
     }
     class GenericMediaMetadata {
       title: string;
@@ -102,6 +114,45 @@ declare namespace chrome.cast {
   }
   class AutoJoinPolicy {
     static ORIGIN_SCOPED: string;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Captions                                                           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The video's WebVTT sidecars as cast text tracks, in manifest order so a
+ * track's index is the same one the in-page caption menu uses.
+ *
+ * The receiver has to be handed these explicitly. Left to itself it finds the
+ * `mov_text` track embedded in the MP4 and lists it, but cannot draw it — a
+ * caption that can be selected and never appears.
+ */
+async function loadCastTracks(url: string): Promise<chrome.cast.media.Track[]> {
+  if (!url.includes("/external/")) return [];
+  try {
+    const res = await fetch(`${url}@subs.json`);
+    if (!res.ok) return [];
+    const json = (await res.json()) as {
+      tracks?: Array<{ src?: unknown; label?: unknown; language?: unknown }>;
+    };
+    return (json.tracks ?? [])
+      .filter((t) => t && typeof t.src === "string")
+      .map((t, i) => {
+        const track = new chrome.cast.media.Track(i + 1, "TEXT");
+        track.trackContentId = url + (t.src as string);
+        track.trackContentType = "text/vtt";
+        track.subtype = "SUBTITLES";
+        if (typeof t.label === "string") track.name = t.label;
+        // An empty or "und" tag is not BCP 47 and the receiver rejects it.
+        if (typeof t.language === "string" && t.language && t.language !== "und") {
+          track.language = t.language;
+        }
+        return track;
+      });
+  } catch {
+    return [];
   }
 }
 
@@ -200,7 +251,8 @@ export function useChromecast() {
   }, []);
 
   const castVideo = useCallback(
-    async (url: string, title?: string, thumbnailUrl?: string) => {
+    /** `captionTrack` is the index selected in the page's caption menu, null for off. */
+    async (url: string, captionTrack: number | null = 0, title?: string, thumbnailUrl?: string) => {
       if (!window.cast?.framework || !window.chrome?.cast) return;
       const ctx = cast.framework.CastContext.getInstance();
 
@@ -228,6 +280,8 @@ export function useChromecast() {
       const contentType = typeMap[ext] || "video/mp4";
 
       const mediaInfo = new chrome.cast.media.MediaInfo(url, contentType);
+      const tracks = await loadCastTracks(url);
+      if (tracks.length > 0) mediaInfo.tracks = tracks;
       if (title || thumbnailUrl) {
         const metadata = new chrome.cast.media.GenericMediaMetadata();
         if (title) metadata.title = title;
@@ -238,6 +292,8 @@ export function useChromecast() {
       const request = new chrome.cast.media.LoadRequest(mediaInfo);
       request.autoplay = true;
       request.currentTime = 0;
+      const active = captionTrack === null ? undefined : tracks[captionTrack];
+      request.activeTrackIds = active ? [active.trackId] : [];
 
       try {
         await session.loadMedia(request);
