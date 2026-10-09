@@ -1,6 +1,6 @@
 import { useCallback, useRef, useEffect } from "react";
 import { useAppContext } from "@/lib/store";
-import { useVoiceSettings } from "@/hooks/useVoiceSettings";
+import { getVoiceSettings, micGain, updateVoiceSettings, useVoiceSettings, type VoiceSettings } from "@/hooks/useVoiceSettings";
 import {
   dropDeferredArrivalSound,
   playDeferredArrivalSound,
@@ -16,6 +16,16 @@ import { browserVoiceBackend, selectVoiceBackend, type LocalMic, type MicOptions
 
 const VOICE_PUBLISH_MAX_RETRIES = 5;
 const VOICE_PUBLISH_ANSWER_TIMEOUT_MS = 10_000;
+
+function micOptionsFrom(settings: VoiceSettings): MicOptions {
+  return {
+    deviceId: settings.inputDeviceId,
+    echoCancellation: settings.echoCancellation,
+    noiseSuppression: settings.noiseSuppressionMode,
+    autoGainControl: settings.autoGainControl,
+    gain: micGain(settings),
+  };
+}
 
 interface UseWebRTCVoiceOptions {
   cleanupScreenRef: React.MutableRefObject<() => Promise<void>>;
@@ -88,6 +98,25 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
       applyVoiceSenderBitrate(voicePublisherPcRef.current, bitrate);
     }
   }, [state.channels, state.voiceChannelId]);
+
+  // Settings changed in the Voice & Audio dialog apply to the call already
+  // running: a different mic or processing reopens the capture under the same
+  // sender, and levels only move a gain.
+  const { inputDeviceId, echoCancellation, noiseSuppressionMode, autoGainControl, inputVolume, inputGainDb } = settings;
+  useEffect(() => {
+    const mic = micRef.current;
+    if (!state.inVoiceChannel || !mic) return;
+    mic.update(micOptionsFrom(getVoiceSettings())).catch((err) => {
+      console.warn("[voice] could not apply microphone settings", err);
+      toast.error("Could not switch microphone. Check that it's connected.");
+    });
+  }, [state.inVoiceChannel, inputDeviceId, echoCancellation, noiseSuppressionMode, autoGainControl, inputVolume, inputGainDb]);
+
+  const { outputDeviceId, outputVolume } = settings;
+  useEffect(() => {
+    if (!state.inVoiceChannel) return;
+    backendRef.current.setOutput({ deviceId: outputDeviceId, volume: outputVolume / 100 });
+  }, [state.inVoiceChannel, outputDeviceId, outputVolume]);
 
   // Drop every slot's audio and the graph they share.
   const closeVoiceAudioGraph = () => {
@@ -490,17 +519,17 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
     // restoring a persisted call hands back what it recorded. Without that the
     // rejoin looks like a fresh one and puts a muted person on an open mic.
     const rejoining = inVoiceRef.current;
-    const nextMuted = restore?.muted ?? (rejoining ? isMutedRef.current : false);
+    // Push-to-talk starts every call silent; the key opens the mic. It used to
+    // carry over from the last call with the mic open until the first release.
+    const pushToTalk = getVoiceSettings().inputMode === "ptt";
+    const nextMuted = pushToTalk || (restore?.muted ?? (rejoining ? isMutedRef.current : false));
     const nextDeafened = restore?.deafened ?? (rejoining ? isDeafenedRef.current : false);
 
     try {
-      const micOptions: MicOptions = {
-        deviceId: settings.inputDeviceId,
-        echoCancellation: settings.echoCancellation,
-        noiseSuppression: settings.noiseSuppressionMode,
-        autoGainControl: settings.autoGainControl,
-        gain: 1,
-      };
+      // Read now rather than from the render that built this callback, which
+      // may predate a change made in the settings dialog.
+      const current = getVoiceSettings();
+      const micOptions = micOptionsFrom(current);
       backendRef.current = selectVoiceBackend();
       let mic: LocalMic;
       try {
@@ -514,13 +543,14 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
         mic = await backendRef.current.acquireMic(micOptions);
       }
       micRef.current = mic;
+      backendRef.current.setOutput({ deviceId: current.outputDeviceId, volume: current.outputVolume / 100 });
       // A fresh track starts enabled, so silence it before anything is sent.
       if (nextMuted || nextDeafened) mic.setEnabled(false);
 
       const resolvedChannelId = channelId || state.voiceChannelId || undefined;
       const joinedChannel = state.channels.find((c) => c.channel_id === resolvedChannelId);
       voiceBitrateRef.current = clampVoiceBitrate(joinedChannel?.voice_bitrate);
-      dispatch({ type: "SET_VOICE_STATE", payload: { inVoiceChannel: true, isMuted: nextMuted, isDeafened: nextDeafened, voiceRoomId: state.currentRoomId, voiceChannelId: resolvedChannelId ?? null, voicePublisherState: "new" } });
+      dispatch({ type: "SET_VOICE_STATE", payload: { inVoiceChannel: true, isMuted: nextMuted, isDeafened: nextDeafened, voiceInputMode: pushToTalk ? "ptt" : "open", voiceRoomId: state.currentRoomId, voiceChannelId: resolvedChannelId ?? null, voicePublisherState: "new" } });
       voiceChannelIdRef.current = resolvedChannelId ?? null;
 
       // Persist voice session for auto-rejoin on refresh
@@ -671,6 +701,9 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   // ─── PTT ──────────────────────────────────────────────────────────────────
   const toggleInputMode = useCallback(() => {
     const newMode = state.voiceInputMode === "open" ? "ptt" : "open";
+    // The toolbar and the settings dialog are one switch: remembered, and
+    // applied from here whichever was used.
+    if (getVoiceSettings().inputMode !== newMode) updateVoiceSettings({ inputMode: newMode });
     if (newMode === "ptt" && micRef.current) {
       micRef.current.setEnabled(false);
       dispatch({ type: "SET_VOICE_STATE", payload: { voiceInputMode: "ptt", isMuted: true } });
@@ -685,6 +718,12 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
       }
     }
   }, [state.voiceInputMode, dispatch]);
+
+  // The dialog's switch, or a call joined with push-to-talk remembered.
+  const { inputMode } = settings;
+  useEffect(() => {
+    if (state.inVoiceChannel && inputMode !== state.voiceInputMode) toggleInputMode();
+  }, [state.inVoiceChannel, inputMode, state.voiceInputMode, toggleInputMode]);
 
   // PTT key handling
   useEffect(() => {

@@ -124,6 +124,17 @@ The Chatter desktop app (Chatter-Desktop, Electron) loads this same client from 
   - The unread badge comes from `document.title` (`"(N) Chatter"`); keep that format.
 - Media goes through `client/src/lib/media/` (see Voice media backends below) so the desktop app can supply a native voice engine. Don't call `new RTCPeerConnection` / `getUserMedia` for voice directly in hooks.
 
+### Voice media backends
+
+`useWebRTCVoice` keeps everything Chatter-specific (signalling, retries, SDP munging, slots, moderation) and gets its media from a `VoiceMediaBackend` (`client/src/lib/media/types.ts`):
+
+- `createPeer()` returns a `VoicePeer`, the subset of `RTCPeerConnection` voice uses. In a browser it *is* an RTCPeerConnection; the desktop engine provides a stand-in with the same behaviour. Only use what the interface declares.
+- `acquireMic()` returns a `LocalMic` (`attachTo`, `setEnabled`, `isSpeaking`, `update`, `stop`). Mute and push-to-talk go through `setEnabled`; settings changes through `update`.
+- The playout graph (`attachSlot`, `setSlotGain`, `setSlotPosition`, `setListenerPosition`, `setOutput`, `closeGraph`) is keyed by slot. Compute gains and positions in the hook; the backend only applies them.
+- `browserVoice.ts` is the implementation every browser uses. `selectVoiceBackend()` picks the desktop engine when the app offers one (feature `voice-backend@1`) and the person hasn't switched it off.
+- `types.ts` is part of the desktop contract: change it additively. A new capability means a new optional member and a new feature string.
+- Voice settings live in one shared store (`useVoiceSettings`); the running call applies changes live.
+
 ## API Patterns
 
 - Auth endpoints: POST `/_matrix/client/r0/register`, `/login`, `/logout`

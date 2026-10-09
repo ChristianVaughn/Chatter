@@ -29,6 +29,19 @@ function micConstraints(options: MicOptions): MediaStreamConstraints {
   };
 }
 
+/** Open the mic, falling back to the default one when the saved device is
+ *  gone — unplugged, or an id from the desktop app's native engine, which
+ *  names devices differently. */
+async function openMic(options: MicOptions): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia(micConstraints(options));
+  } catch (err) {
+    const name = (err as DOMException)?.name;
+    if (options.deviceId === "default" || (name !== "OverconstrainedError" && name !== "NotFoundError")) throw err;
+    return navigator.mediaDevices.getUserMedia(micConstraints({ ...options, deviceId: "default" }));
+  }
+}
+
 /** Whether two option sets need a new capture rather than a gain change. */
 function captureChanged(a: MicOptions, b: MicOptions): boolean {
   return (
@@ -120,7 +133,7 @@ class BrowserMic implements LocalMic {
     const recapture = captureChanged(this.options, options);
     this.options = options;
     if (recapture) {
-      const next = await navigator.mediaDevices.getUserMedia(micConstraints(options));
+      const next = await openMic(options);
       const previous = this.raw;
       this.raw = next;
       if (this.gainGraph) {
@@ -174,7 +187,7 @@ class BrowserVoiceBackend implements VoiceMediaBackend {
   }
 
   async acquireMic(options: MicOptions): Promise<LocalMic> {
-    const stream = await navigator.mediaDevices.getUserMedia(micConstraints(options));
+    const stream = await openMic(options);
     return new BrowserMic(stream, options);
   }
 
@@ -325,7 +338,7 @@ class BrowserVoiceBackend implements VoiceMediaBackend {
     options: MicOptions & { outputDeviceId: string },
     onLevel: (level: number) => void,
   ): Promise<MicTest> {
-    const stream = await navigator.mediaDevices.getUserMedia(micConstraints(options));
+    const stream = await openMic(options);
     const ctx = new AudioContext({ sampleRate: 48000 });
     await ctx.resume();
     const source = ctx.createMediaStreamSource(stream);
