@@ -355,6 +355,11 @@ pub(crate) async fn admin_delete_user(
 
     // Same as a self-deletion: the account going away takes its uploads.
     super::media::purge_user_uploads(&state, &target_id).await;
+    let _ = state
+        .db
+        .collection::<mongodb::bson::Document>("gif_favorites")
+        .delete_one(doc! { "_id": &target_id })
+        .await;
     Ok(Json(json!({ "deleted": true })))
 }
 

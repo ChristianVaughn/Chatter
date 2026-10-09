@@ -2781,3 +2781,91 @@ async fn deleting_a_message_takes_its_upload_only_when_asked() {
         "a delete that declined should leave the file under My Files"
     );
 }
+
+#[tokio::test]
+async fn gif_favorites_contract_follows_the_user_across_devices() {
+    let server = spawn_server().await;
+    let client = Client::new();
+    let (_, token) = register_user(&client, &server.base_url, "gifkeeper", "pw").await;
+    let url = format!("{}/api/gif-favorites", server.base_url);
+
+    let empty: Value = client
+        .get(&url)
+        .header("authorization", bearer(&token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty["favorites"], json!([]));
+    assert_eq!(empty["categories"], json!([]));
+
+    // A second device with the app open hears about each change.
+    let mut other_device = ws_connect_authenticated(&server.ws_url, &token).await;
+
+    let op = |body: Value| {
+        client
+            .post(&url)
+            .header("authorization", bearer(&token))
+            .json(&body)
+            .send()
+    };
+
+    assert_eq!(
+        op(json!({"op": "create_category", "id": "cats", "name": "Cats"}))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let filed: Value = op(json!({
+        "op": "set_in_category",
+        "id": "cats",
+        "url": "https://media.example/cat.gif",
+        "in_category": true,
+    }))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(filed["favorites"], json!(["https://media.example/cat.gif"]));
+    assert_eq!(
+        filed["categories"][0]["urls"],
+        json!(["https://media.example/cat.gif"])
+    );
+
+    let pushed = recv_matching_rev(&mut other_device, filed["rev"].as_i64().unwrap()).await;
+    assert_eq!(pushed["categories"], filed["categories"]);
+
+    // Unsafe urls never reach anyone's <img src>.
+    assert_eq!(
+        op(json!({"op": "add_favorite", "url": "javascript:alert(1)"}))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    // Unfavouriting takes the GIF out of its category; the category remains.
+    let removed: Value =
+        op(json!({"op": "remove_favorite", "url": "https://media.example/cat.gif"}))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(removed["favorites"], json!([]));
+    assert_eq!(removed["categories"][0]["name"], "Cats");
+    assert_eq!(removed["categories"][0]["urls"], json!([]));
+}
+
+async fn recv_matching_rev(ws: &mut common::WsStream, rev: i64) -> Value {
+    loop {
+        let event = recv_event_type(ws, "gif_favorites").await;
+        if event["rev"].as_i64() == Some(rev) {
+            return event;
+        }
+    }
+}

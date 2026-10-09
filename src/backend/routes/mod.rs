@@ -9,6 +9,7 @@ pub(crate) mod continuity;
 pub(crate) mod events;
 pub(crate) mod forum;
 pub(crate) mod friends;
+pub(crate) mod gif_favorites;
 pub(crate) mod invites;
 pub(crate) mod media;
 pub(crate) mod message_links;

@@ -908,6 +908,11 @@ pub(crate) async fn delete_account(
     // Deleting an account has to take its files too, or "delete my account"
     // leaves every screenshot the person ever posted still served.
     super::media::purge_user_uploads(&state, &user_id).await;
+    let _ = state
+        .db
+        .collection::<mongodb::bson::Document>("gif_favorites")
+        .delete_one(doc! { "_id": &user_id })
+        .await;
 
     let _ = users.delete_one(doc! { "_id": &user_id }).await;
 

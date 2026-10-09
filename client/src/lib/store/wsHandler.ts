@@ -3,6 +3,7 @@ import type { Action, AppState, VoiceChannelMember } from "./types";
 import { apiGetRoomMembers } from "../api";
 import { displayUserId } from "@/lib/utils";
 import { forgetMessagePreview } from "@/lib/messageLinks";
+import { adoptGifFavorites } from "@/hooks/useFavoriteGifs";
 import { toast } from "sonner";
 import {
   notificationBody,
@@ -808,6 +809,10 @@ export function createWsMessageHandler(
           payload: { roomId: msg.room_id, hasMention: true },
         });
       }
+    }
+    // The user's own favourite GIFs, changed on this or another device.
+    else if (msg.type === "gif_favorites") {
+      adoptGifFavorites(msg);
     }
     else if (msg.type === "m.room.dm_streak") {
       dispatch({

@@ -30,6 +30,7 @@ use super::{
             get_friends_presence, get_mutual_friends, reject_friend_request, remove_friend,
             send_friend_request, unblock_user,
         },
+        gif_favorites::{apply_gif_favorites_op, get_gif_favorites},
         invites::{accept_invite, create_invite, delete_invite, get_invite_info, list_invites},
         media::{
             delete_upload, gif_search, link_preview, list_uploads, upload_abort, upload_chunk,
@@ -376,6 +377,10 @@ pub(crate) fn build_router() -> Router<Arc<AppState>> {
         // Cross-device continuity: unsent drafts and video resume points
         .route("/api/continuity", get(get_continuity))
         .route("/api/appearance", get(get_appearance).put(set_appearance))
+        .route(
+            "/api/gif-favorites",
+            get(get_gif_favorites).post(apply_gif_favorites_op),
+        )
         .route("/api/rooms/{room_id}/draft", put(set_draft))
         .route("/api/media/resume", put(set_resume_point))
         // Read markers / unread counts

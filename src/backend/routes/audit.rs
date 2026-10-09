@@ -110,7 +110,7 @@ pub(crate) async fn list_audit_log(
 /// `refresh_tokens` is deliberately absent — those are live session material,
 /// they expire on their own, and restoring them would resurrect sessions that
 /// should have died with the old instance.
-const EXPORTED: [&str; 17] = [
+const EXPORTED: [&str; 18] = [
     "server_settings",
     "users",
     "rooms",
@@ -128,6 +128,7 @@ const EXPORTED: [&str; 17] = [
     "forum_posts",
     "invites",
     "audit_log",
+    "gif_favorites",
 ];
 
 /// A complete logical backup of the database, as newline-delimited JSON.

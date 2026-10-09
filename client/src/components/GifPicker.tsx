@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { apiSearchGifs } from "@/lib/api";
 import { Folder, Loader2, MoreHorizontal, Plus, Star } from "lucide-react";
-import { useFavoriteGifs, MAX_CATEGORY_NAME } from "@/hooks/useFavoriteGifs";
+import { useFavoriteGifs, loadGifFavorites, MAX_CATEGORY_NAME } from "@/hooks/useFavoriteGifs";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -168,6 +168,12 @@ export function GifPicker({ onSelect }: GifPickerProps) {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Opening the picker is when favourites matter, so check they are current
+  // rather than trusting a socket that may have missed a change.
+  useEffect(() => {
+    void loadGifFavorites();
   }, []);
 
   // Load trending on mount

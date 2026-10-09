@@ -8,6 +8,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ConfirmProvider } from "@/components/ConfirmDialog";
 import { ThemeProvider } from "@/lib/theme";
 import { ThemeSync } from "@/components/ThemeSync";
+import { GifFavoritesSync } from "@/components/GifFavoritesSync";
 import { ThemeInvite } from "@/components/ThemeInvite";
 import { MessageLinkOpener } from "@/components/MessageLinkOpener";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -84,6 +85,7 @@ function App() {
           <TooltipProvider>
             <ConfirmProvider>
               <ThemeSync />
+              <GifFavoritesSync />
               <ThemeInvite />
               <MessageLinkOpener />
               <AppContent />

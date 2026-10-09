@@ -3030,6 +3030,43 @@ export async function apiSetAppearance(
   return res.json() as Promise<{ saved: boolean; updated_at: number }>;
 }
 
+/** Favourite GIFs and their categories, as the server holds them. `rev` grows
+ *  with every write, so a client can tell a fresh copy from a stale one. */
+export interface GifFavoritesPayload {
+  favorites: string[];
+  categories: { id: string; name: string; urls: string[] }[];
+  rev: number;
+}
+
+/** One change to favourites — see `backend/routes/gif_favorites.rs`. */
+export type GifFavoritesOp =
+  | { op: "add_favorite"; url: string }
+  | { op: "remove_favorite"; url: string }
+  | { op: "create_category"; id: string; name: string }
+  | { op: "rename_category"; id: string; name: string }
+  | { op: "delete_category"; id: string }
+  | { op: "set_in_category"; id: string; url: string; in_category: boolean }
+  | { op: "import"; favorites: string[]; categories: { id: string; name: string; urls: string[] }[] };
+
+export async function apiGetGifFavorites() {
+  const res = await authenticatedFetch("/api/gif-favorites");
+  if (!res.ok) throw new Error("Failed to load favourite GIFs");
+  return res.json() as Promise<GifFavoritesPayload>;
+}
+
+/** Applies one operation and answers with the whole result. */
+export async function apiGifFavoritesOp(op: GifFavoritesOp) {
+  const res = await authenticatedFetch("/api/gif-favorites", {
+    method: "POST",
+    body: JSON.stringify(op),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error || "Failed to save favourite GIFs");
+  }
+  return res.json() as Promise<GifFavoritesPayload>;
+}
+
 export async function apiGetContinuity() {
   const res = await authenticatedFetch("/api/continuity");
   if (!res.ok) throw new Error("Failed to load continuity state");
