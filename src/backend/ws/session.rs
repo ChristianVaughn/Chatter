@@ -317,6 +317,15 @@ pub(crate) async fn handle_websocket(state: Arc<AppState>, socket: WebSocket) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
+    // `{"client": {"kind": "desktop", "version": "…"}}` from the desktop app.
+    // Browsers send no `client`, so its absence means "web".
+    let is_desktop = auth_msg
+        .as_ref()
+        .and_then(|m| m.get("client"))
+        .and_then(|c| c.get("kind"))
+        .and_then(|k| k.as_str())
+        == Some("desktop");
+
     // JWT decode — no DB call; fall back to bot token if JWT fails
     let user_id_opt = match token {
         Some(ref t) => get_user_from_token(&state, t),
@@ -383,6 +392,15 @@ pub(crate) async fn handle_websocket(state: Arc<AppState>, socket: WebSocket) {
         if is_mobile {
             state
                 .mobile_connections
+                .write()
+                .await
+                .entry(user_id.clone())
+                .or_default()
+                .insert(conn_id);
+        }
+        if is_desktop {
+            state
+                .desktop_connections
                 .write()
                 .await
                 .entry(user_id.clone())
@@ -2737,12 +2755,12 @@ pub(crate) async fn cleanup_disconnect(state: &AppState, user_id: &str, conn_id:
 
     // Only mark offline and broadcast when the last connection closes.
     // Whether or not the session survives, this connection is gone.
-    {
-        let mut mobile = state.mobile_connections.write().await;
-        if let Some(conns) = mobile.get_mut(user_id) {
+    for kind in [&state.mobile_connections, &state.desktop_connections] {
+        let mut map = kind.write().await;
+        if let Some(conns) = map.get_mut(user_id) {
             conns.remove(&conn_id);
             if conns.is_empty() {
-                mobile.remove(user_id);
+                map.remove(user_id);
             }
         }
     }

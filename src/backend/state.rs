@@ -70,6 +70,11 @@ pub struct AppState {
     /// record — alive. A single flag could only ever record whichever device
     /// connected last, and nothing revised it until every device had gone.
     pub(crate) mobile_connections: RwLock<HashMap<String, HashSet<u64>>>,
+    /// Connections from the Chatter desktop app, which says so in its first
+    /// frame. A desktop app sits in the tray all day with its socket open, so
+    /// unlike a browser tab an open connection doesn't mean anyone is there to
+    /// see a notification; push decides with this.
+    pub(crate) desktop_connections: RwLock<HashMap<String, HashSet<u64>>>,
     pub(crate) voice_channels: RwLock<HashMap<String, HashMap<String, VoiceMemberState>>>,
     // Server-muted users per room. Held outside VoiceMemberState so a moderator's
     // mute survives the user leaving and rejoining the channel.
