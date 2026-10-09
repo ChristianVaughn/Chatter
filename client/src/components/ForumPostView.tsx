@@ -535,7 +535,7 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
             </>
           )}
 
-          <div className="mt-1.5 flex items-center gap-3">
+          <div className="mt-1.5 flex flex-wrap items-center gap-3">
             {!comment.deleted && (
               <button
                 onClick={() => startReply(comment)}
@@ -553,6 +553,14 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
                 {isFolded ? <ChevronRight className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
                 {replyCount} {replyCount === 1 ? "reply" : "replies"}
               </button>
+            )}
+            {!comment.deleted && (
+              <ForumReactions
+                targetId={comment.comment_id}
+                initial={comment.reactions}
+                compact
+                revealAdd
+              />
             )}
           </div>
         </div>
@@ -655,7 +663,7 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
             />
           )}
 
-          <ForumReactions post={post} />
+          <ForumReactions targetId={post.post_id} initial={post.reactions} />
 
           {/* Discussion — behind the post, not beside it: a rule, a quieter
               heading, and a fold, so the page is the post first. */}

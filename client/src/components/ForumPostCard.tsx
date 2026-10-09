@@ -98,7 +98,7 @@ export function ForumPostCard({ post, onClick, onDelete, canDelete, tags }: Foru
         )}
 
         <div className="flex items-center gap-2 mt-auto pt-1">
-          <ForumReactions post={post} compact />
+          <ForumReactions targetId={post.post_id} initial={post.reactions} compact />
 
           {/* Downloads have no thumbnail to stand for them, so the row says
               they are there. */}

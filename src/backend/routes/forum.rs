@@ -269,7 +269,10 @@ fn post_to_json(post: &ForumPostRecord, reactions: &HashMap<String, Vec<String>>
     })
 }
 
-fn comment_to_json(comment: &ForumCommentRecord) -> Value {
+fn comment_to_json(
+    comment: &ForumCommentRecord,
+    reactions: &HashMap<String, Vec<String>>,
+) -> Value {
     // A deleted comment is still sent when replies hang off it, so the thread
     // below does not lose its shape — but nothing it said goes with it.
     if comment.deleted {
@@ -300,6 +303,7 @@ fn comment_to_json(comment: &ForumCommentRecord) -> Value {
         "image_urls": images,
         "video_urls": comment.video_urls.clone(),
         "file_urls": comment.file_urls,
+        "reactions": reactions,
         "created_at": comment.created_at,
         "deleted": false,
         "edited": comment.edited,
@@ -332,6 +336,34 @@ fn comments_worth_sending(comments: &[ForumCommentRecord]) -> Vec<bool> {
         }
     }
     keep
+}
+
+/// Reactions for many targets in one query, keyed by target id — a post's
+/// comments are fetched together, so this is one round trip per post opened
+/// rather than one per comment.
+async fn get_reactions_for_events(
+    state: &AppState,
+    event_ids: &[&str],
+) -> HashMap<String, HashMap<String, Vec<String>>> {
+    let mut by_event: HashMap<String, HashMap<String, Vec<String>>> = HashMap::new();
+    if event_ids.is_empty() {
+        return by_event;
+    }
+    let react_coll = state.db.collection::<ReactionRecord>("reactions");
+    if let Ok(mut cursor) = react_coll
+        .find(doc! { "event_id": { "$in": event_ids } })
+        .await
+    {
+        while let Ok(Some(record)) = cursor.try_next().await {
+            by_event
+                .entry(record.event_id)
+                .or_default()
+                .entry(record.emoji)
+                .or_default()
+                .push(record.user_id);
+        }
+    }
+    by_event
 }
 
 async fn get_reactions_for_event(state: &AppState, event_id: &str) -> HashMap<String, Vec<String>> {
@@ -517,11 +549,27 @@ pub(crate) async fn get_post(
         }
     }
     let keep = comments_worth_sending(&records);
-    let comments: Vec<Value> = records
+    let kept: Vec<&ForumCommentRecord> = records
         .iter()
         .zip(keep)
         .filter(|(_, keep)| *keep)
-        .map(|(comment, _)| comment_to_json(comment))
+        .map(|(comment, _)| comment)
+        .collect();
+    let live_ids: Vec<&str> = kept
+        .iter()
+        .filter(|c| !c.deleted)
+        .map(|c| c.comment_id.as_str())
+        .collect();
+    let comment_reactions = get_reactions_for_events(&state, &live_ids).await;
+    let no_reactions = HashMap::new();
+    let comments: Vec<Value> = kept
+        .iter()
+        .map(|comment| {
+            let reactions = comment_reactions
+                .get(&comment.comment_id)
+                .unwrap_or(&no_reactions);
+            comment_to_json(comment, reactions)
+        })
         .collect();
 
     Ok(Json(json!({
@@ -661,7 +709,7 @@ pub(crate) async fn create_comment(
         )
         .await;
 
-    let comment_json = comment_to_json(&comment);
+    let comment_json = comment_to_json(&comment, &HashMap::new());
     let broadcast_msg = json!({
         "type": "forum.comment.created",
         "room_id": room_id,
@@ -703,6 +751,12 @@ pub(crate) async fn delete_comment(
             doc! { "_id": &comment_id },
             doc! { "$set": { "deleted": true } },
         )
+        .await;
+    // A tombstone shows nothing the comment said, its reactions included.
+    let _ = state
+        .db
+        .collection::<ReactionRecord>("reactions")
+        .delete_many(doc! { "event_id": &comment_id })
         .await;
 
     // Decrement comment_count

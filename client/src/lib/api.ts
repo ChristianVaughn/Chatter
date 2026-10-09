@@ -2151,6 +2151,9 @@ export interface ForumComment {
   image_urls?: string[];
   video_urls?: string[];
   file_urls?: string[];
+  /** Emoji to the users who reacted with it. Live updates arrive through the
+   *  store's `messageReactions`, keyed by `comment_id`. */
+  reactions?: Record<string, string[]>;
   /** The comment this replies to; empty or absent means it answers the post. */
   parent_id?: string;
   /** A comment that was deleted but still holds replies under it. Its author
