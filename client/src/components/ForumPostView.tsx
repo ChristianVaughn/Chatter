@@ -38,6 +38,7 @@ import {
 } from "@/lib/forumThread";
 import { sortForumAttachments } from "@/lib/mediaTypes";
 import { useUploadQueue } from "@/hooks/useUploadQueue";
+import { clipboardFiles } from "@/lib/clipboardFiles";
 import { UploadProgressOverlay } from "@/components/UploadProgressOverlay";
 import { toast } from "sonner";
 import { useConfirm } from "@/components/ConfirmDialog";
@@ -791,6 +792,14 @@ export function ForumPostView({ roomId, postId, onBack }: ForumPostViewProps) {
               placeholder={replyingTo ? `Reply to ${displayUserId(replyingTo.author)}…` : "Write a comment..."}
               value={commentBody}
               onChange={(e) => setCommentBody(e.target.value)}
+              onPaste={(e) => {
+                // A pasted screenshot is staged like a picked file; text
+                // pastes as usual.
+                const files = clipboardFiles(e);
+                if (files.length === 0) return;
+                e.preventDefault();
+                stageCommentImages(files);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();

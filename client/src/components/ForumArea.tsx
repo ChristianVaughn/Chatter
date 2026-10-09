@@ -33,6 +33,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Plus, Paperclip, X, Search, ArrowUpDown, Tags } from "lucide-react";
 import { usePendingFiles, MAX_ATTACHMENTS } from "@/hooks/usePendingFiles";
+import { clipboardFiles } from "@/lib/clipboardFiles";
 import { sortForumAttachments } from "@/lib/mediaTypes";
 import { StagedForumFile } from "@/components/ForumMediaGallery";
 import { useUploadQueue } from "@/hooks/useUploadQueue";
@@ -652,6 +653,12 @@ function CreatePostDialog({
               placeholder="Write your post content..."
               value={body}
               onChange={(e) => setBody(e.target.value)}
+              onPaste={(e) => {
+                const files = clipboardFiles(e);
+                if (files.length === 0) return;
+                e.preventDefault();
+                stageImages(files);
+              }}
               maxLength={4000}
               rows={4}
             />
