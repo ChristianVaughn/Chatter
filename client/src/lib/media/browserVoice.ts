@@ -167,6 +167,7 @@ class BrowserVoiceBackend implements VoiceMediaBackend {
   // outlives its speakers, so the panner is re-aimed when the slot changes
   // hands rather than rebuilt — rebuilding would drop the audio mid-word.
   private readonly slotPanner = new Map<number, PannerNode>();
+  private readonly slotClones = new Map<number, MediaStreamTrack>();
 
   createPeer(config: RTCConfiguration): VoicePeer {
     return new RTCPeerConnection(config) as unknown as VoicePeer;
@@ -214,7 +215,14 @@ class BrowserVoiceBackend implements VoiceMediaBackend {
     // a live stream.
     if (!this.slotGain.has(slot)) {
       const { ctx, master } = this.graph();
-      const source = ctx.createMediaStreamSource(stream);
+      // Web Audio gets its own clone of the track. Current Chromium hands a
+      // remote track's audio to the element playing it and gives a Web Audio
+      // source on the same track silence, so the call was inaudible; the
+      // element still has to play the original for Web Audio to receive
+      // anything at all.
+      const clone = stream.getAudioTracks()[0]?.clone();
+      if (clone) this.slotClones.set(slot, clone);
+      const source = ctx.createMediaStreamSource(clone ? new MediaStream([clone]) : stream);
       const gain = ctx.createGain();
       gain.gain.value = 0;
       const panner = ctx.createPanner();
@@ -284,6 +292,8 @@ class BrowserVoiceBackend implements VoiceMediaBackend {
     this.slotPanner.clear();
     this.slotAudio.forEach((el) => { el.pause(); el.srcObject = null; });
     this.slotAudio.clear();
+    this.slotClones.forEach((track) => track.stop());
+    this.slotClones.clear();
     if (this.ctx) {
       this.ctx.close().catch(() => {});
       this.ctx = null;
