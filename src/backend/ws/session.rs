@@ -2559,15 +2559,37 @@ async fn current_is_mobile(state: &AppState, user_id: &str) -> bool {
 }
 
 pub(crate) async fn cleanup_disconnect(state: &AppState, user_id: &str, conn_id: u64) {
-    // Teardown voice WebRTC
-    teardown_voice_listener(state, user_id).await;
-    let _ = teardown_voice_publisher(state, user_id).await;
+    // Media is keyed by user, not by connection, so it belongs to whichever
+    // connection holds the voice session. Tearing it down for any closing
+    // socket meant shutting a spare tab — or a desktop app's window reload
+    // racing a browser tab — cut the audio of a call running elsewhere while
+    // the membership stayed up. Only the session holder, or the user's last
+    // connection, takes the media down with it.
+    let holds_session = {
+        let vc = state.voice_channels.read().await;
+        vc.values()
+            .any(|members| holds_voice_session(members, user_id, conn_id))
+    };
+    let last_connection = {
+        let ws = state.active_websockets.read().await;
+        ws.get(user_id)
+            .is_none_or(|conns| conns.keys().all(|id| *id == conn_id))
+    };
+    let owns_media = holds_session || last_connection;
 
-    teardown_screen_subscriptions_for_viewer(state, user_id).await;
-    let publisher_room = teardown_screen_publisher(state, user_id).await;
+    let (publisher_room, webcam_publisher_room) = if owns_media {
+        teardown_voice_listener(state, user_id).await;
+        let _ = teardown_voice_publisher(state, user_id).await;
 
-    teardown_webcam_subscriptions_for_viewer(state, user_id).await;
-    let webcam_publisher_room = teardown_webcam_publisher(state, user_id).await;
+        teardown_screen_subscriptions_for_viewer(state, user_id).await;
+        let publisher_room = teardown_screen_publisher(state, user_id).await;
+
+        teardown_webcam_subscriptions_for_viewer(state, user_id).await;
+        let webcam_publisher_room = teardown_webcam_publisher(state, user_id).await;
+        (publisher_room, webcam_publisher_room)
+    } else {
+        (None, None)
+    };
 
     // Remove from voice channels and broadcast leaves
     // (room, channel, was_sharing, who is left). The map is keyed by channel, so
