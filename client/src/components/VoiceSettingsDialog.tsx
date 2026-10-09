@@ -48,6 +48,8 @@ export function VoiceSettingsDialog({
   const [testing, setTesting] = useState(false);
   const [pttBinding, setPttBinding] = useState<PttBinding | null>(null);
   const [capturingKey, setCapturingKey] = useState(false);
+  const desktopDucking = hasDesktopFeature("ducking") ? desktop?.ducking : undefined;
+  const [ducking, setDucking] = useState<number | null>(null);
 
   const micTestRef = useRef<MicTest | null>(null);
   const desktopPtt = hasDesktopFeature("ptt") ? desktop?.pushToTalk : undefined;
@@ -118,6 +120,7 @@ export function VoiceSettingsDialog({
     }
     loadDevices();
     void desktopPtt?.getBinding().then(setPttBinding).catch(() => {});
+    void desktopDucking?.get().then(setDucking).catch(() => {});
     return backend.onDevicesChanged(() => void loadDevices());
   }, [open, backend]);
 
@@ -342,6 +345,31 @@ export function VoiceSettingsDialog({
                 </span>
               </div>
             </div>
+
+            {desktopDucking && ducking !== null && (
+              <div className="space-y-2">
+                <Label>Lower Other Apps</Label>
+                <p className="text-xs text-muted-foreground">
+                  Turns down games and music while people in the call are talking.
+                </p>
+                <div className="flex items-center gap-3">
+                  <Slider
+                    className="flex-1"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={[Math.round(ducking * 100)]}
+                    onValueChange={([v]) => {
+                      setDucking(v / 100);
+                      void desktopDucking.set(v / 100);
+                    }}
+                  />
+                  <span className="w-10 text-right text-xs text-muted-foreground">
+                    {ducking === 0 ? "Off" : `${Math.round(ducking * 100)}%`}
+                  </span>
+                </div>
+              </div>
+            )}
           </TabsContent>
 
           {/* ── Advanced Tab ── */}

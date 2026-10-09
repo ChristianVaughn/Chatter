@@ -36,6 +36,13 @@ export interface DesktopGameActivity {
   subscribe(listener: (game: string | null) => void): () => void;
 }
 
+/** feature "ducking": lower other apps' sound while people in the call
+ *  talk. `amount` is 0 (off) to 1 (silence them). */
+export interface DesktopDucking {
+  get(): Promise<number>;
+  set(amount: number): Promise<void>;
+}
+
 export interface ChatterDesktopBridge {
   bridgeVersion: number;
   appVersion: string;
@@ -49,6 +56,7 @@ export interface ChatterDesktopBridge {
    *  app (or everything but Chatter) rather than the browser's loopback. */
   displayCapture?: (apiVersion: 1) => unknown;
   gameActivity?: DesktopGameActivity;
+  ducking?: DesktopDucking;
 }
 
 declare global {
