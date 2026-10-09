@@ -122,6 +122,8 @@ The Chatter desktop app (Chatter-Desktop, Electron) loads this same client from 
   - `pushSupport()` returns `"desktop"`: Electron has a PushManager with no push service behind it. The app notifies from the tray through the ordinary in-page notifications.
   - Push-to-talk (feature `ptt`): the app watches a key system-wide and reports press/release through `desktop.pushToTalk`, replacing the in-window backtick listener in `useWebRTCVoice`.
   - The unread badge comes from `document.title` (`"(N) Chatter"`); keep that format.
+  - Screen sharing goes through `selectDisplayCapture()` (lib/media). With feature `app-audio@1` the desktop app's picker also chooses the audio — the shared app's own sound, or everything except Chatter — captured natively and added to the stream as an ordinary audio track.
+  - Game activity (feature `game-activity`): the desktop app reports the game it sees running; the client sends `{type: "game_activity", game}` and the server shows it in `steam_game` when Steam isn't reporting one (`set_desktop_game` in `ws/session.rs`). `hide_steam_game` hides both.
 - Media goes through `client/src/lib/media/` (see Voice media backends below) so the desktop app can supply a native voice engine. Don't call `new RTCPeerConnection` / `getUserMedia` for voice directly in hooks.
 
 ### Voice media backends

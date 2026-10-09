@@ -1119,9 +1119,14 @@ pub(crate) struct PresenceRecord {
     pub(crate) custom_status: String,
     pub(crate) manual_status: Option<String>,
     pub(crate) is_mobile: bool,
+    /// The game being played, as shown ("Playing …"). Steam's report when
+    /// it has one (then `steam_appid` is set), otherwise the desktop app's.
     pub(crate) steam_game: Option<String>,
     pub(crate) steam_appid: Option<String>,
     pub(crate) game_session_start: Option<f64>,
+    /// What the desktop app reports the user playing, kept apart so the Steam
+    /// poller can fall back to it when Steam reports nothing.
+    pub(crate) desktop_game: Option<String>,
 }
 
 #[derive(Clone, Serialize)]

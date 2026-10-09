@@ -1031,7 +1031,16 @@ async fn steam_presence_poller(state: Arc<AppState>) {
 
         // Update presence and broadcast changes
         for (steam_id, user_id) in &steam_to_user {
-            let new_game = in_game.get(steam_id).map(|(g, _)| g.clone());
+            // Steam's title when it reports one; otherwise whatever the
+            // desktop app saw.
+            let desktop_game = {
+                let up = state.user_presence.read().await;
+                up.get(user_id).and_then(|p| p.desktop_game.clone())
+            };
+            let new_game = in_game
+                .get(steam_id)
+                .map(|(g, _)| g.clone())
+                .or(desktop_game);
             let new_appid = in_game.get(steam_id).map(|(_, a)| a.clone());
 
             let changed = {

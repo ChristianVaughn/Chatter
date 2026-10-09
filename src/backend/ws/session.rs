@@ -439,6 +439,7 @@ pub(crate) async fn handle_websocket(state: Arc<AppState>, socket: WebSocket) {
                         steam_game: None,
                         steam_appid: None,
                         game_session_start: None,
+                        desktop_game: None,
                     },
                 );
             }
@@ -2435,6 +2436,15 @@ pub(crate) async fn handle_ws_text(state: Arc<AppState>, user_id: &str, conn_id:
         // unlike the keepalive it means something.
         "activity" => {}
         "heartbeat" => {}
+        // The desktop app saw a game running (or stop): `{"game": "Name" | null}`.
+        "game_activity" => {
+            let game = msg
+                .get("game")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().chars().take(128).collect::<String>())
+                .filter(|s| !s.is_empty());
+            set_desktop_game(&state, user_id, game).await;
+        }
         "embed_interaction" => {
             // User clicked a button or used a select on a bot embed.
             // Validate the user is in the room, then broadcast to room so the bot receives it.
@@ -2574,6 +2584,62 @@ async fn current_is_mobile(state: &AppState, user_id: &str) -> bool {
     let mobile = state.mobile_connections.read().await;
     let empty = HashSet::new();
     is_mobile_only(&live, mobile.get(user_id).unwrap_or(&empty))
+}
+
+/// Record the game the desktop app reports, and show it unless Steam is
+/// reporting one (Steam knows the exact title) or the user hides their game.
+pub(crate) async fn set_desktop_game(state: &AppState, user_id: &str, game: Option<String>) {
+    let hidden = state
+        .db
+        .collection::<UserRecord>("users")
+        .find_one(doc! { "_id": user_id })
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|u| u.hide_steam_game);
+    let game = if hidden { None } else { game };
+
+    let changed = {
+        let mut up = state.user_presence.write().await;
+        let Some(p) = up.get_mut(user_id) else { return };
+        p.desktop_game = game.clone();
+        if p.steam_appid.is_some() || p.steam_game == game {
+            None
+        } else {
+            p.game_session_start = game.as_ref().map(|_| now_secs());
+            p.steam_game = game.clone();
+            Some((
+                presence_status(p, now_secs()).to_string(),
+                p.custom_status.clone(),
+                p.is_mobile,
+                p.game_session_start,
+            ))
+        }
+    };
+    let Some((status, custom_status, is_mobile, game_session_start)) = changed else {
+        return;
+    };
+
+    let user_rooms: Vec<String> = {
+        let rm = state.room_members.read().await;
+        rm.iter()
+            .filter(|(_, members)| members.iter().any(|m| m == user_id))
+            .map(|(rid, _)| rid.clone())
+            .collect()
+    };
+    let event = json!({
+        "type": "presence_update",
+        "user_id": user_id,
+        "status": status,
+        "custom_status": custom_status,
+        "is_mobile": is_mobile,
+        "steam_game": game,
+        "steam_appid": Value::Null,
+        "game_session_start": game_session_start,
+    });
+    for rid in user_rooms {
+        broadcast_to_room(state, &rid, &event).await;
+    }
 }
 
 pub(crate) async fn cleanup_disconnect(state: &AppState, user_id: &str, conn_id: u64) {
@@ -2755,14 +2821,22 @@ pub(crate) async fn cleanup_disconnect(state: &AppState, user_id: &str, conn_id:
 
     // Only mark offline and broadcast when the last connection closes.
     // Whether or not the session survives, this connection is gone.
+    let mut last_desktop_closed = false;
     for kind in [&state.mobile_connections, &state.desktop_connections] {
         let mut map = kind.write().await;
         if let Some(conns) = map.get_mut(user_id) {
+            let was_desktop =
+                std::ptr::eq(kind, &state.desktop_connections) && conns.contains(&conn_id);
             conns.remove(&conn_id);
             if conns.is_empty() {
                 map.remove(user_id);
+                last_desktop_closed |= was_desktop;
             }
         }
+    }
+    // The app that saw the game is gone; nobody is left to say it stopped.
+    if last_desktop_closed && still_connected {
+        set_desktop_game(state, user_id, None).await;
     }
 
     // A phone closing while a desktop stays connected leaves the session up, so
