@@ -197,6 +197,10 @@ fn marks_user_active(msg_type: &str) -> bool {
             // Housekeeping after a reconnect or a room switch.
             | "voice_state_request"
             | "watchparty_request_sync"
+            // The desktop app noticing a game, not the person doing anything:
+            // it reports on every reconnect, and a launcher can start a game
+            // on an empty desk.
+            | "game_activity"
     ) && !msg_type.contains("_webrtc_")
 }
 
@@ -2438,6 +2442,17 @@ pub(crate) async fn handle_ws_text(state: Arc<AppState>, user_id: &str, conn_id:
         "heartbeat" => {}
         // The desktop app saw a game running (or stop): `{"game": "Name" | null}`.
         "game_activity" => {
+            // Only the desktop app reports games; anything else could set one
+            // that nothing would ever clear.
+            let from_desktop = state
+                .desktop_connections
+                .read()
+                .await
+                .get(user_id)
+                .is_some_and(|conns| conns.contains(&conn_id));
+            if !from_desktop {
+                return;
+            }
             let game = msg
                 .get("game")
                 .and_then(|v| v.as_str())
@@ -2654,12 +2669,24 @@ pub(crate) async fn cleanup_disconnect(state: &AppState, user_id: &str, conn_id:
         vc.values()
             .any(|members| holds_voice_session(members, user_id, conn_id))
     };
-    let last_connection = {
-        let ws = state.active_websockets.read().await;
-        ws.get(user_id)
-            .is_none_or(|conns| conns.keys().all(|id| *id == conn_id))
+    // Remove this specific connection first and see whether any remain: of
+    // two connections closing together, exactly one then sees itself as the
+    // last and takes the media down.
+    let still_connected = {
+        let mut ws_map = state.active_websockets.write().await;
+        if let Some(conns) = ws_map.get_mut(user_id) {
+            conns.remove(&conn_id);
+            if conns.is_empty() {
+                ws_map.remove(user_id);
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
     };
-    let owns_media = holds_session || last_connection;
+    let owns_media = holds_session || !still_connected;
 
     let (publisher_room, webcam_publisher_room) = if owns_media {
         teardown_voice_listener(state, user_id).await;
@@ -2803,22 +2830,6 @@ pub(crate) async fn cleanup_disconnect(state: &AppState, user_id: &str, conn_id:
         broadcast_to_room(state, &room_id, &event).await;
     }
 
-    // Remove this specific connection; check whether any remain.
-    let still_connected = {
-        let mut ws_map = state.active_websockets.write().await;
-        if let Some(conns) = ws_map.get_mut(user_id) {
-            conns.remove(&conn_id);
-            if conns.is_empty() {
-                ws_map.remove(user_id);
-                false
-            } else {
-                true
-            }
-        } else {
-            false
-        }
-    };
-
     // Only mark offline and broadcast when the last connection closes.
     // Whether or not the session survives, this connection is gone.
     let mut last_desktop_closed = false;
@@ -2835,8 +2846,21 @@ pub(crate) async fn cleanup_disconnect(state: &AppState, user_id: &str, conn_id:
         }
     }
     // The app that saw the game is gone; nobody is left to say it stopped.
-    if last_desktop_closed && still_connected {
-        set_desktop_game(state, user_id, None).await;
+    // Cleared even when this was the last connection: presence outlives the
+    // socket, and the next connect would announce the old game again.
+    if last_desktop_closed {
+        if still_connected {
+            set_desktop_game(state, user_id, None).await;
+        } else {
+            let mut up = state.user_presence.write().await;
+            if let Some(p) = up.get_mut(user_id) {
+                p.desktop_game = None;
+                if p.steam_appid.is_none() {
+                    p.steam_game = None;
+                    p.game_session_start = None;
+                }
+            }
+        }
     }
 
     // A phone closing while a desktop stays connected leaves the session up, so

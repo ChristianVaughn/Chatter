@@ -62,6 +62,9 @@ class BrowserMic implements LocalMic {
   private gainGraph: { ctx: AudioContext; gain: GainNode; out: MediaStreamAudioDestinationNode } | null = null;
   private sender: RTCRtpSender | null = null;
   private enabled = true;
+  private stopped = false;
+  /** Bumped by every update(), so a slow one can't land after a newer one. */
+  private generation = 0;
   private speaking: { ctx: AudioContext; analyser: AnalyserNode; streamId: string } | null = null;
   private readonly freq = new Uint8Array(128);
 
@@ -71,9 +74,11 @@ class BrowserMic implements LocalMic {
     this.syncGain();
   }
 
-  /** The track that goes on the wire. */
+  /** The track that goes on the wire. The processed one only while its
+   *  context runs: a suspended context would send silence. */
   private get sentTrack(): MediaStreamTrack {
-    const stream = this.gainGraph ? this.gainGraph.out.stream : this.raw;
+    const graph = this.gainGraph;
+    const stream = graph && graph.ctx.state === "running" ? graph.out.stream : this.raw;
     return stream.getAudioTracks()[0];
   }
 
@@ -86,14 +91,40 @@ class BrowserMic implements LocalMic {
       return;
     }
     if (!this.gainGraph) {
-      const ctx = new AudioContext({ sampleRate: 48000 });
+      // The device's own rate: forcing one makes some browsers refuse a mic
+      // stream recorded at another.
+      const ctx = new AudioContext();
       const gain = ctx.createGain();
       const out = ctx.createMediaStreamDestination();
       ctx.createMediaStreamSource(this.raw).connect(gain);
       gain.connect(out);
       this.gainGraph = { ctx, gain, out };
+      // A context made without a user gesture (rejoining after a reload)
+      // starts suspended. The raw mic goes out until it runs, then the
+      // processed one takes over.
+      ctx.addEventListener("statechange", () => {
+        if (ctx.state === "running" && this.gainGraph?.ctx === ctx) void this.swapSentTrack();
+      });
+      void ctx.resume().catch(() => {});
+      if (ctx.state !== "running") {
+        const resume = () => void ctx.resume().catch(() => {});
+        window.addEventListener("pointerdown", resume, { once: true });
+        window.addEventListener("keydown", resume, { once: true });
+      }
     }
     this.gainGraph.gain.gain.value = this.options.gain;
+  }
+
+  private async swapSentTrack(): Promise<void> {
+    if (!this.sender || this.stopped) return;
+    const track = this.sentTrack;
+    track.enabled = this.enabled;
+    try {
+      await this.sender.replaceTrack(track);
+    } catch {
+      // The publisher closed (a force-mute, a retry); the next one attaches
+      // the current track itself.
+    }
   }
 
   attachTo(peer: VoicePeer): void {
@@ -106,7 +137,7 @@ class BrowserMic implements LocalMic {
   setEnabled(on: boolean): void {
     this.enabled = on;
     this.raw.getAudioTracks().forEach((t) => { t.enabled = on; });
-    this.sentTrack.enabled = on;
+    this.gainGraph?.out.stream.getAudioTracks().forEach((t) => { t.enabled = on; });
   }
 
   isSpeaking(): boolean {
@@ -130,29 +161,40 @@ class BrowserMic implements LocalMic {
   }
 
   async update(options: MicOptions): Promise<void> {
+    const generation = ++this.generation;
     const recapture = captureChanged(this.options, options);
-    this.options = options;
-    if (recapture) {
-      const next = await openMic(options);
-      const previous = this.raw;
-      this.raw = next;
-      if (this.gainGraph) {
-        this.gainGraph.ctx.close().catch(() => {});
-        this.gainGraph = null;
-      }
-      this.syncGain();
-      previous.getTracks().forEach((t) => t.stop());
-    } else {
+    if (!recapture) {
+      this.options = options;
       const hadGraph = !!this.gainGraph;
       this.syncGain();
       // Only the gain moved and the graph was already there: nothing to swap.
-      if (hadGraph === !!this.gainGraph) return;
+      if (hadGraph !== !!this.gainGraph) {
+        this.setEnabled(this.enabled);
+        await this.swapSentTrack();
+      }
+      return;
     }
+    const next = await openMic(options);
+    // Stopped meanwhile, or overtaken by a newer change: this capture isn't wanted.
+    if (this.stopped || generation !== this.generation) {
+      next.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    this.options = options;
+    const previous = this.raw;
+    this.raw = next;
+    if (this.gainGraph) {
+      this.gainGraph.ctx.close().catch(() => {});
+      this.gainGraph = null;
+    }
+    this.syncGain();
+    previous.getTracks().forEach((t) => t.stop());
     this.setEnabled(this.enabled);
-    if (this.sender) await this.sender.replaceTrack(this.sentTrack);
+    await this.swapSentTrack();
   }
 
   stop(): void {
+    this.stopped = true;
     this.raw.getTracks().forEach((t) => t.stop());
     this.gainGraph?.ctx.close().catch(() => {});
     this.gainGraph = null;
