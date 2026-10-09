@@ -10,6 +10,7 @@ import { decideResumeAction } from "@/lib/wsResume";
 import { useVersionCheck } from "@/hooks/useVersionCheck";
 import { displayUserId } from "@/lib/utils";
 import { settingsKey, type NotificationLevel, type NotificationSettings } from "@/lib/notifications";
+import { desktop } from "@/lib/desktop/bridge";
 import {
   setAccessToken,
   setRefreshToken,
@@ -465,7 +466,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     ws.onopen = () => {
       // Use getAccessToken() in case another refresh happened between now and above
       const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-      ws.send(JSON.stringify({ access_token: getAccessToken() ?? token, is_mobile: isMobileDevice }));
+      ws.send(JSON.stringify({
+        access_token: getAccessToken() ?? token,
+        is_mobile: isMobileDevice,
+        // The desktop app says so: it keeps its socket open from the tray, so
+        // the server only lets it stand in for a phone push while it's in use.
+        ...(desktop && { client: { kind: "desktop", version: desktop.appVersion } }),
+      }));
       dispatch({ type: "SET_WS_CONNECTED", payload: true });
 
       // Live events only exist while the socket does. Anything sent while it

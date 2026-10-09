@@ -111,6 +111,19 @@ On GitHub, the same checks run in `.github/workflows/rust-quality.yml`.
 - `src/components/RoomDialogs.tsx` - Create/Join room dialogs
 - Vite dev server proxies API calls to `localhost:8000` for hot-reload development
 
+## Desktop App
+
+The Chatter desktop app (Chatter-Desktop, Electron) loads this same client from the server, exactly as a browser does, and adds `window.chatterDesktop` before the page runs. In a browser it is absent and nothing changes. Keep the web client working on its own; desktop paths are always `if (desktop)` extras.
+
+- `client/src/lib/desktop/bridge.ts` - The bridge's types and the `desktop` / `hasDesktopFeature()` helpers. It is the contract the desktop app type-checks against: change it additively only, never rename a field or a feature string.
+- Check `hasDesktopFeature("…")` before using anything past the base fields. This client updates on every deploy; installed desktop apps lag behind.
+- What the desktop app changes today:
+  - The first WebSocket frame carries `client: {kind: "desktop", version}`. The server records it (`desktop_connections`) so push only treats a desktop socket as "someone will see it" while the user is active (`push.rs`, `attended_users`) — a tray app stays connected all day.
+  - `pushSupport()` returns `"desktop"`: Electron has a PushManager with no push service behind it. The app notifies from the tray through the ordinary in-page notifications.
+  - Push-to-talk (feature `ptt`): the app watches a key system-wide and reports press/release through `desktop.pushToTalk`, replacing the in-window backtick listener in `useWebRTCVoice`.
+  - The unread badge comes from `document.title` (`"(N) Chatter"`); keep that format.
+- Media goes through `client/src/lib/media/` (see Voice media backends below) so the desktop app can supply a native voice engine. Don't call `new RTCPeerConnection` / `getUserMedia` for voice directly in hooks.
+
 ## API Patterns
 
 - Auth endpoints: POST `/_matrix/client/r0/register`, `/login`, `/logout`

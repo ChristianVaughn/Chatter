@@ -9,6 +9,7 @@ import {
 } from "@/lib/sounds";
 import { fetchIceServers, getWebRTCConfig, VOICE_SUBSCRIBE_RETRY_MS, VOICE_SUBSCRIBE_MAX_RETRIES, VOICE_SUBSCRIBE_MAX_BACKOFF_MS, VOICE_PUBLISH_INITIAL_RETRY_MS, VOICE_PUBLISH_MAX_BACKOFF_MS, VOICE_SLOT_COUNT, VOICE_BITRATE_DEFAULT_BPS, canSignal, clampVoiceBitrate, mungeVoiceAudioSdp, applyVoiceSenderBitrate } from "@/lib/webrtc";
 import { toast } from "sonner";
+import { desktop, hasDesktopFeature } from "@/lib/desktop/bridge";
 import type { VoiceRestoreState } from "@/lib/voiceRejoin";
 import { DISTANCE_MODEL, glide, toWorld } from "@/lib/spatialAudio";
 
@@ -758,29 +759,42 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   // PTT key handling
   useEffect(() => {
     if (!state.inVoiceChannel || state.voiceInputMode !== "ptt") return;
-    const down = (e: KeyboardEvent) => {
-      if (e.key === "`" && !e.repeat) {
-        localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = true; });
-        dispatch({ type: "SET_VOICE_STATE", payload: { isMuted: false } });
-        playSound("unmute", roomSoundsRef.current);
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: "voice_mute", room_id: voiceRoomIdRef.current || currentRoomRef.current, channel_id: voiceChannelIdRef.current || undefined, muted: false }));
-        }
+    let transmitting = false;
+    const setTransmitting = (on: boolean) => {
+      if (on === transmitting) return;
+      transmitting = on;
+      localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = on; });
+      dispatch({ type: "SET_VOICE_STATE", payload: { isMuted: !on } });
+      playSound(on ? "unmute" : "mute", roomSoundsRef.current);
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "voice_mute", room_id: voiceRoomIdRef.current || currentRoomRef.current, channel_id: voiceChannelIdRef.current || undefined, muted: !on }));
       }
+    };
+
+    // The desktop app watches its key system-wide, so it works while a game
+    // has focus; a browser only sees keys while this page does.
+    const desktopPtt = hasDesktopFeature("ptt") ? desktop?.pushToTalk : undefined;
+    if (desktopPtt) {
+      return desktopPtt.subscribe(setTransmitting);
+    }
+
+    const down = (e: KeyboardEvent) => {
+      if (e.key === "`" && !e.repeat) setTransmitting(true);
     };
     const up = (e: KeyboardEvent) => {
-      if (e.key === "`") {
-        localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = false; });
-        dispatch({ type: "SET_VOICE_STATE", payload: { isMuted: true } });
-        playSound("mute", roomSoundsRef.current);
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: "voice_mute", room_id: voiceRoomIdRef.current || currentRoomRef.current, channel_id: voiceChannelIdRef.current || undefined, muted: true }));
-        }
-      }
+      if (e.key === "`") setTransmitting(false);
     };
+    // The keyup never arrives if focus leaves mid-press; without this the mic
+    // stayed open until the key was pressed again.
+    const blur = () => setTransmitting(false);
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
-    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+    window.addEventListener("blur", blur);
+    return () => {
+      window.removeEventListener("keydown", down);
+      window.removeEventListener("keyup", up);
+      window.removeEventListener("blur", blur);
+    };
   }, [state.inVoiceChannel, state.voiceInputMode, dispatch]);
 
   // ─── Volume control ───────────────────────────────────────────────────────
