@@ -11,7 +11,8 @@ import { fetchIceServers, getWebRTCConfig, VOICE_SUBSCRIBE_RETRY_MS, VOICE_SUBSC
 import { toast } from "sonner";
 import { desktop, hasDesktopFeature } from "@/lib/desktop/bridge";
 import type { VoiceRestoreState } from "@/lib/voiceRejoin";
-import { DISTANCE_MODEL, glide, toWorld } from "@/lib/spatialAudio";
+import { toWorld } from "@/lib/spatialAudio";
+import { browserVoiceBackend, selectVoiceBackend, type LocalMic, type MicOptions, type VoiceMediaBackend, type VoicePeer } from "@/lib/media";
 
 const VOICE_PUBLISH_MAX_RETRIES = 5;
 const VOICE_PUBLISH_ANSWER_TIMEOUT_MS = 10_000;
@@ -24,21 +25,19 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   const { state, dispatch, wsRef, loadVoiceMembers } = useAppContext();
   const { settings } = useVoiceSettings();
 
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const voicePublisherPcRef = useRef<RTCPeerConnection | null>(null);
+  // Which media stack this call runs on: the browser's, or the desktop app's
+  // native engine. Chosen at join (lib/media) and kept for the whole call.
+  const backendRef = useRef<VoiceMediaBackend>(browserVoiceBackend);
+  const micRef = useRef<LocalMic | null>(null);
+  const voicePublisherPcRef = useRef<VoicePeer | null>(null);
   // One connection for the whole call. The server writes whoever is currently
   // loudest into a fixed set of slots on it, so this stays a single connection
   // whether the call has three people in it or three hundred.
-  const voiceSubscriberPcRef = useRef<RTCPeerConnection | null>(null);
+  const voiceSubscriberPcRef = useRef<VoicePeer | null>(null);
   // Everything below is keyed by slot index, not by user: a slot outlives the
-  // speakers that pass through it.
-  const voiceSlotAudioRef = useRef<Map<number, HTMLAudioElement>>(new Map());
-  const voiceSlotGainRef = useRef<Map<number, GainNode>>(new Map());
+  // speakers that pass through it. The backend holds each slot's audio.
+  const voiceSlotsRef = useRef<Set<number>>(new Set());
   const voiceSlotUsersRef = useRef<Map<number, string>>(new Map());
-  // One panner per slot, between the slot's gain and the destination. A slot
-  // outlives its speakers, so the panner is re-aimed when the slot changes
-  // hands rather than rebuilt — rebuilding would drop the audio mid-word.
-  const voiceSlotPannerRef = useRef<Map<number, PannerNode>>(new Map());
   // Where everyone in the call is standing, and whether this channel has a
   // floor at all. Refs because the audio graph is updated from callbacks that
   // must not re-run on every render.
@@ -47,10 +46,6 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
     me: { x: 0.5, y: 0.5 },
     others: {},
   });
-  // One AudioContext for the whole call, with a gain node per slot hanging off
-  // it. A context per speaker capped call size far below anything else here —
-  // browsers limit how many a single document may hold.
-  const voiceAudioCtxRef = useRef<AudioContext | null>(null);
   const voiceUserVolumesRef = useRef<Record<string, number>>({});
   const voiceSubscribeRetryCountRef = useRef(0);
   const createVoiceSubscriptionRef = useRef<() => Promise<void>>(async () => {});
@@ -94,39 +89,23 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
     }
   }, [state.channels, state.voiceChannelId]);
 
-  // Built on first use and reused for every speaker. A context that was closed
-  // by an earlier call is replaced rather than revived — closing is final.
-  const getVoiceAudioCtx = () => {
-    if (!voiceAudioCtxRef.current || voiceAudioCtxRef.current.state === "closed") {
-      voiceAudioCtxRef.current = new AudioContext();
-    }
-    return voiceAudioCtxRef.current;
-  };
-
-  // Drop every slot's gain node and the context they share.
+  // Drop every slot's audio and the graph they share.
   const closeVoiceAudioGraph = () => {
-    voiceSlotGainRef.current.forEach((gain) => { try { gain.disconnect(); } catch {} });
-    voiceSlotGainRef.current.clear();
-    voiceSlotPannerRef.current.forEach((panner) => { try { panner.disconnect(); } catch { /* already gone with the context */ } });
-    voiceSlotPannerRef.current.clear();
-    voiceSlotAudioRef.current.forEach((el) => { el.pause(); el.srcObject = null; });
-    voiceSlotAudioRef.current.clear();
+    backendRef.current.closeGraph();
+    voiceSlotsRef.current.clear();
     voiceSlotUsersRef.current.clear();
-    if (voiceAudioCtxRef.current) {
-      voiceAudioCtxRef.current.close().catch(() => {});
-      voiceAudioCtxRef.current = null;
-    }
   };
 
   // A slot plays at the volume set for whoever currently occupies it, and is
   // silent while empty — an unassigned slot still carries whatever the previous
   // speaker left in the pipeline.
   const applySlotGain = (slot: number) => {
-    const gain = voiceSlotGainRef.current.get(slot);
-    if (!gain) return;
+    if (!voiceSlotsRef.current.has(slot)) return;
     const userId = voiceSlotUsersRef.current.get(slot);
-    gain.gain.value =
-      isDeafenedRef.current || !userId ? 0 : (voiceUserVolumesRef.current[userId] ?? 1.0);
+    backendRef.current.setSlotGain(
+      slot,
+      isDeafenedRef.current || !userId ? 0 : (voiceUserVolumesRef.current[userId] ?? 1.0),
+    );
   };
 
   // Point a slot's panner at whoever is in it. An ordinary voice channel puts
@@ -134,49 +113,29 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   // centred pan — the graph is the same shape either way, so nothing has to be
   // rewired when the person walks into a spatial channel.
   const applySlotPosition = useCallback((slot: number) => {
-    const panner = voiceSlotPannerRef.current.get(slot);
-    const ctx = voiceAudioCtxRef.current;
-    if (!panner || !ctx) return;
+    if (!voiceSlotsRef.current.has(slot)) return;
     const spatial = spatialRef.current;
     const userId = voiceSlotUsersRef.current.get(slot);
     const at = spatial.on && userId ? spatial.others[userId] : undefined;
-    const world = at ? toWorld(at.x, at.y) : { x: 0, y: 0, z: 0 };
-    const now = ctx.currentTime;
     // An unoccupied slot is silenced by its gain, so it is left where it was
     // rather than swung to the middle — the swing would be audible on the next
     // speaker to land in it.
     if (spatial.on && !at && userId) return;
-    glide(panner.positionX, world.x, now);
-    glide(panner.positionY, world.y, now);
-    glide(panner.positionZ, world.z, now);
+    backendRef.current.setSlotPosition(slot, at ? toWorld(at.x, at.y) : { x: 0, y: 0, z: 0 });
   }, []);
 
   // The listener is the person at the keyboard. Moving them rather than
   // offsetting every source keeps one definition of where anybody is.
   const applyListenerPosition = useCallback(() => {
-    const ctx = voiceAudioCtxRef.current;
-    if (!ctx) return;
     const spatial = spatialRef.current;
-    const world = spatial.on ? toWorld(spatial.me.x, spatial.me.y) : { x: 0, y: 0, z: 0 };
-    const now = ctx.currentTime;
-    const listener = ctx.listener as AudioListener & {
-      positionX?: AudioParam;
-      setPosition?: (x: number, y: number, z: number) => void;
-    };
-    if (listener.positionX) {
-      glide(listener.positionX, world.x, now);
-      glide(listener.positionY, world.y, now);
-      glide(listener.positionZ, world.z, now);
-    } else {
-      // Safari until recently: no AudioParams on the listener, only the
-      // deprecated setter. It jumps rather than glides, which is the cost.
-      listener.setPosition?.(world.x, world.y, world.z);
-    }
+    backendRef.current.setListenerPosition(
+      spatial.on ? toWorld(spatial.me.x, spatial.me.y) : { x: 0, y: 0, z: 0 },
+    );
   }, []);
 
   const applyAllSlotPositions = useCallback(() => {
     applyListenerPosition();
-    voiceSlotPannerRef.current.forEach((_, slot) => applySlotPosition(slot));
+    voiceSlotsRef.current.forEach((slot) => applySlotPosition(slot));
   }, [applyListenerPosition, applySlotPosition]);
 
   // Where everyone in the call is standing, kept in a ref for the audio graph
@@ -232,11 +191,10 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
 
   // ─── Voice publisher ──────────────────────────────────────────────────────
   const createVoicePublisher = useCallback(async () => {
-    if (!localStreamRef.current || !canSignal(wsRef)) return;
-    const pc = new RTCPeerConnection(getWebRTCConfig());
+    if (!micRef.current || !canSignal(wsRef)) return;
+    const pc = backendRef.current.createPeer(getWebRTCConfig());
     voicePublisherPcRef.current = pc;
-    const audioTrack = localStreamRef.current?.getAudioTracks()[0];
-    if (audioTrack) pc.addTrack(audioTrack, localStreamRef.current!);
+    micRef.current.attachTo(pc);
 
     pc.onicecandidate = (ev) => {
       if (!ev.candidate || !canSignal(wsRef)) return;
@@ -324,7 +282,7 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   const createVoiceSubscription = useCallback(async () => {
     if (!canSignal(wsRef) || voiceSubscriberPcRef.current) return;
 
-    const pc = new RTCPeerConnection(getWebRTCConfig());
+    const pc = backendRef.current.createPeer(getWebRTCConfig());
     voiceSubscriberPcRef.current = pc;
 
     pc.onicecandidate = (ev) => {
@@ -343,42 +301,13 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
       const slot = pc.getTransceivers().indexOf(ev.transceiver);
       if (slot < 0) return;
 
-      let audioEl = voiceSlotAudioRef.current.get(slot);
-      if (!audioEl) {
-        audioEl = new Audio();
-        audioEl.autoplay = true;
-        voiceSlotAudioRef.current.set(slot, audioEl);
-      }
-      const stream = ev.streams[0] || new MediaStream([ev.track]);
-      audioEl.srcObject = stream;
-
-      // Route through a GainNode so per-user volume can exceed 100%, then a
-      // PannerNode so a spatial channel can place the speaker. The panner is
-      // built for every call, spatial or not: it is inert at the listener's
-      // own position, and adding one mid-call would mean rebuilding the graph
-      // under a live stream.
-      if (!voiceSlotGainRef.current.has(slot)) {
-        const ctx = getVoiceAudioCtx();
-        const source = ctx.createMediaStreamSource(stream);
-        const gain = ctx.createGain();
-        gain.gain.value = 0;
-        const panner = ctx.createPanner();
-        panner.panningModel = "equalpower";
-        panner.distanceModel = "inverse";
-        panner.refDistance = DISTANCE_MODEL.refDistance;
-        panner.rolloffFactor = DISTANCE_MODEL.rolloffFactor;
-        panner.maxDistance = DISTANCE_MODEL.maxDistance;
-        source.connect(gain);
-        gain.connect(panner);
-        panner.connect(ctx.destination);
-        voiceSlotGainRef.current.set(slot, gain);
-        voiceSlotPannerRef.current.set(slot, panner);
-        // Mute the HTML element since GainNode handles playback
-        audioEl.volume = 0;
-      }
+      // Each slot gets its own gain (per-user volume can exceed 100%) and
+      // position (spatial channels), silent until the slot map says who is in
+      // it.
+      backendRef.current.attachSlot(slot, ev);
+      voiceSlotsRef.current.add(slot);
       applySlotGain(slot);
       applySlotPosition(slot);
-      audioEl.play().catch(() => {});
     };
 
     pc.onconnectionstatechange = () => {
@@ -482,7 +411,7 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
         // while muted, so tearing the publisher down here just stops sending
         // into a closed door; rebuilding it on release restores our voice.
         if (msg.force_muted) {
-          localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = false; });
+          micRef.current?.setEnabled(false);
           if (voicePublisherPcRef.current) {
             try { voicePublisherPcRef.current.close(); } catch { /* already closed */ }
             voicePublisherPcRef.current = null;
@@ -549,10 +478,8 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
       voicePublishRetryCountRef.current = 0;
       voiceSubscribeRetryCountRef.current = 0;
 
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-      }
+      micRef.current?.stop();
+      micRef.current = null;
     }
 
     // Joining while already in a call is either a channel switch or a rejoin
@@ -567,21 +494,28 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
     const nextDeafened = restore?.deafened ?? (rejoining ? isDeafenedRef.current : false);
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: settings.inputDeviceId !== "default" ? { exact: settings.inputDeviceId } : undefined,
-          echoCancellation: settings.echoCancellation,
-          noiseSuppression: settings.noiseSuppressionMode === "browser",
-          autoGainControl: settings.autoGainControl,
-          sampleRate: 48000,
-        },
-        video: false,
-      });
-      localStreamRef.current = stream;
-      // A fresh track starts enabled, so silence it before anything is sent.
-      if (nextMuted || nextDeafened) {
-        stream.getAudioTracks().forEach((t) => { t.enabled = false; });
+      const micOptions: MicOptions = {
+        deviceId: settings.inputDeviceId,
+        echoCancellation: settings.echoCancellation,
+        noiseSuppression: settings.noiseSuppressionMode,
+        autoGainControl: settings.autoGainControl,
+        gain: 1,
+      };
+      backendRef.current = selectVoiceBackend();
+      let mic: LocalMic;
+      try {
+        mic = await backendRef.current.acquireMic(micOptions);
+      } catch (err) {
+        // The native engine couldn't open the mic (or isn't running): the
+        // browser's stack can still carry the call.
+        if (backendRef.current === browserVoiceBackend) throw err;
+        console.warn("[voice] native engine unavailable, using the browser's", err);
+        backendRef.current = browserVoiceBackend;
+        mic = await backendRef.current.acquireMic(micOptions);
       }
+      micRef.current = mic;
+      // A fresh track starts enabled, so silence it before anything is sent.
+      if (nextMuted || nextDeafened) mic.setEnabled(false);
 
       const resolvedChannelId = channelId || state.voiceChannelId || undefined;
       const joinedChannel = state.channels.find((c) => c.channel_id === resolvedChannelId);
@@ -678,10 +612,8 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
     // A sting must never surface on some later call it was not announcing.
     dropDeferredArrivalSound();
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
-      localStreamRef.current = null;
-    }
+    micRef.current?.stop();
+    micRef.current = null;
 
     dispatch({ type: "SET_VOICE_STATE", payload: { inVoiceChannel: false, isMuted: false, isDeafened: false, isScreenSharing: false, voiceRoomId: null, voiceChannelId: null, voiceChannelName: null, voicePublisherState: "closed" } });
     // Cleared so a refresh on this device does not auto-rejoin and take the
@@ -724,9 +656,9 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   // naming the visible one sent the mute to a room the other end was not in,
   // and the mic icon beside their name never moved.
   const toggleMute = useCallback(() => {
-    if (!localStreamRef.current) return;
+    if (!micRef.current) return;
     const newMuted = !state.isMuted;
-    localStreamRef.current.getAudioTracks().forEach((t) => { t.enabled = !newMuted; });
+    micRef.current.setEnabled(!newMuted);
     isMutedRef.current = newMuted;
     dispatch({ type: "SET_VOICE_STATE", payload: { isMuted: newMuted } });
     persistVoiceSession({ muted: newMuted });
@@ -739,16 +671,14 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   // ─── PTT ──────────────────────────────────────────────────────────────────
   const toggleInputMode = useCallback(() => {
     const newMode = state.voiceInputMode === "open" ? "ptt" : "open";
-    if (newMode === "ptt" && localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((t) => { t.enabled = false; });
+    if (newMode === "ptt" && micRef.current) {
+      micRef.current.setEnabled(false);
       dispatch({ type: "SET_VOICE_STATE", payload: { voiceInputMode: "ptt", isMuted: true } });
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "voice_mute", room_id: voiceRoomIdRef.current || currentRoomRef.current, channel_id: voiceChannelIdRef.current || undefined, muted: true }));
       }
     } else {
-      if (localStreamRef.current) {
-        localStreamRef.current.getAudioTracks().forEach((t) => { t.enabled = true; });
-      }
+      micRef.current?.setEnabled(true);
       dispatch({ type: "SET_VOICE_STATE", payload: { voiceInputMode: "open", isMuted: false } });
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "voice_mute", room_id: voiceRoomIdRef.current || currentRoomRef.current, channel_id: voiceChannelIdRef.current || undefined, muted: false }));
@@ -763,7 +693,7 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
     const setTransmitting = (on: boolean) => {
       if (on === transmitting) return;
       transmitting = on;
-      localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = on; });
+      micRef.current?.setEnabled(on);
       dispatch({ type: "SET_VOICE_STATE", payload: { isMuted: !on } });
       playSound(on ? "unmute" : "mute", roomSoundsRef.current);
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -812,16 +742,12 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
     const newDeafened = !state.isDeafened;
     // Disable the outgoing mic track when deafening so others can't hear the user.
     // When undeafening, only re-enable it if the user isn't separately muted.
-    if (localStreamRef.current) {
-      localStreamRef.current.getAudioTracks().forEach((t) => {
-        t.enabled = newDeafened ? false : !state.isMuted;
-      });
-    }
+    micRef.current?.setEnabled(newDeafened ? false : !state.isMuted);
     // Set before the gains are recomputed: applySlotGain reads this ref, and a
     // slot map arriving before the next render would otherwise be built at full
     // volume while the user is deafened.
     isDeafenedRef.current = newDeafened;
-    voiceSlotGainRef.current.forEach((_, slot) => applySlotGain(slot));
+    voiceSlotsRef.current.forEach((slot) => applySlotGain(slot));
     persistVoiceSession({ deafened: newDeafened });
     dispatch({ type: "SET_VOICE_STATE", payload: { isDeafened: newDeafened } });
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -839,7 +765,7 @@ export function useWebRTCVoice({ cleanupScreenRef }: UseWebRTCVoiceOptions) {
   releaseVoiceRef.current = teardownLocalVoice;
 
   return {
-    localStreamRef,
+    micRef,
     voicePublisherPcRef,
     voiceSubscriberPcRef,
     joinVoice,
